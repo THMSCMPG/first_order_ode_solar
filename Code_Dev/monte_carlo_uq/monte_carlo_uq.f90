@@ -31,7 +31,7 @@ program monte_carlo_uq
     integer,  parameter :: N_MC    = 1000         ! number of Monte Carlo runs
     real(8),  parameter :: x_start = 0.0d0
     real(8),  parameter :: x_end   = 3600.0d0     ! 1 hour
-    real(8),  parameter :: h       = 50.0d0       ! step size (s) -- matches baseline
+    real(8),  parameter :: h       = 100.0d0       ! step size (s) -- matches baseline
     real(8),  parameter :: y0      = 298.15d0     ! T_0 = T_amb (K)
 
     ! Parameter distribution means (match euler_ode.f90 nominal values)

@@ -40,7 +40,7 @@ program coupled_thermal_electrical
 
     real(8), parameter :: x_start = 0.0d0
     real(8), parameter :: x_end   = 3600.0d0    ! 1 hour
-    real(8), parameter :: h       = 50.0d0      ! step size (s) -- matches baseline
+    real(8), parameter :: h       = 100.0d0      ! step size (s) -- matches baseline
     real(8), parameter :: y0      = 298.15d0    ! T_0 = T_amb (K)
 
     ! Electrical efficiency model (Skoplaki & Palyvos, Solar Energy 2009)

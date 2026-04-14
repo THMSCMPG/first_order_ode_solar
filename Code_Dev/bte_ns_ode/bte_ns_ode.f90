@@ -109,7 +109,7 @@ program bte_ns_ode
     !--------------------------------------------------------------------------
     real(8), parameter :: x_start  = 0.0d0          ! sunrise (s)
     real(8), parameter :: x_end    = 86400.0d0       ! 24-hour diurnal cycle (s)
-    real(8), parameter :: h_step   = 50.0d0          ! RK4 step size (s)
+    real(8), parameter :: h_step   = 100.0d0          ! RK4 step size (s)
 
     !--------------------------------------------------------------------------
     !  Initial conditions

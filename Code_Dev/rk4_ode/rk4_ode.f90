@@ -31,7 +31,7 @@ program rk4_ode
     ! Integration parameters (identical to euler_ode.f90 for direct comparison)
     real(8), parameter :: x_start = 0.0d0       ! t = 0 s
     real(8), parameter :: x_end   = 3600.0d0    ! t = 1 hour
-    real(8), parameter :: h       = 50.0d0      ! step size (s)
+    real(8), parameter :: h       = 100.0d0      ! step size (s)
     real(8), parameter :: y0      = 298.15d0    ! T_0 = T_amb (K)
 
     integer  :: n_steps, i
