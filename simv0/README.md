@@ -15,11 +15,18 @@ RK45 with adaptive step-size control, and introduces two new physical models:
 
 ```bash
 cd simv0/
-make        # compile (requires gfortran)
-./simv0     # run the default 24-hour simulation
+make                          # compile (requires gfortran)
+make run                      # run all simulation modes → data/*.dat
+gnuplot plots/plot_simv0.gp   # visualise (optional, requires gnuplot)
 ```
 
-Output files appear in the working directory; sample results are in `data/`.
+Or via Python:
+
+```bash
+python run_simv0.py           # build (if needed) + run + write metadata JSON
+```
+
+Output `.dat` files and `simv0_metadata.json` appear in `data/`.
 
 ---
 
@@ -180,7 +187,8 @@ two-way BTE diagnostic.
 gnuplot plots/plot_simv0.gp
 ```
 
-Produces five PNG images in `plots/`:
+Run from the `simv0/` directory.  Produces five PNG images in `plots/`:
+
 1. `01_temperature_comparison.png` — three-mode temperature comparison
 2. `02_wind_and_irradiance.png` — dynamic WS and G_eff
 3. `03_spatial_layers.png` — all five layer temperatures
@@ -189,38 +197,47 @@ Produces five PNG images in `plots/`:
 
 ---
 
-## GUI plotting (advanced)
+## Metadata JSON
 
-The Tkinter launcher (`simv0_launcher_gui.py`) now includes a backend-agnostic
-plotting stack (`plotting_service.py`) with the following capabilities:
+After each run, `python run_simv0.py` writes `data/simv0_metadata.json`
+capturing the run context and key summary statistics:
 
-- **Plot modes**: 2D multi-line/multi-file overlays and 3D plotting
-- **Backends**: `gnuplot` (primary) with automatic fallback to `matplotlib`
-- **Error bars**: optional per-series uncertainty column (`y ± yerr`)
-- **Unit-aware validation**: series are checked for compatible `header(unit)` Y units
-- **Statistics**: per-series `n`, mean, std, min, max, 95% CI, correlation `r`,
-  and linear regression slope/intercept against selected X
-- **Presets**: reusable preset templates for common workflows (comparison, power,
-  error bars, 3D)
-- **Export**: save generated plot (PNG/PDF) and save statistics (TXT)
-
-### Header and units convention
-
-Columns should follow the existing style:
-
-```text
-# t(s)  T(K)  WS(m/s)  ...
+```json
+{
+  "timestamp": "2026-04-15T10:30:00Z",
+  "hostname": "...",
+  "fortran_compiler": "GNU Fortran 12.3.0 ...",
+  "simulation_mode": "all (decoupled + coupled + spatial)",
+  "parameters": {
+    "h_default_s": 100,
+    "atol_K": 0.1,
+    "rtol": 1e-06,
+    "N_layers": 5,
+    "t_start_s": 0,
+    "t_end_s": 86400
+  },
+  "summary": {
+    "peak_T_decoupled_K": 313.94,
+    "peak_T_coupled_K": 306.22,
+    "peak_T_spatial_K": 304.75,
+    "rk45_steps_accepted": 847,
+    "h_min_s": 1.0,
+    "h_max_s": 45.2,
+    "h_final_s": 2.1
+  },
+  "output_files": [
+    "simv0_decoupled.dat",
+    "simv0_coupled.dat",
+    "simv0_spatial.dat",
+    "simv0_comparison.dat",
+    "simv0_diagnostic.dat"
+  ]
+}
 ```
 
-Unit parsing is based on `name(unit)`. Unitless columns are supported but mixed
-Y-units in one plot are rejected to prevent invalid comparisons.
-
-### Data ingestion behavior
-
-- The GUI dynamically discovers `.dat` files under `simv0/data/` (not a fixed list).
-- Missing files/columns and backend/runtime errors are reported in the GUI.
-- If `gnuplot` is unavailable in `PATH`, plotting automatically falls back to
-  `matplotlib`.
+This enables batch processing and sensitivity analysis without manual
+note-taking.  Example: sweep `h_default` values and collect
+`peak_T_coupled_K` from each `simv0_metadata.json`.
 
 ---
 
@@ -285,3 +302,18 @@ make
 ```
 
 Tested with `gfortran` 9–14.
+
+---
+
+## Archived files
+
+The Tkinter GUI launcher and backend-agnostic plotting abstraction have been
+moved to `archived/` for historical reference:
+
+| File | Description |
+|------|-------------|
+| `archived/simv0_launcher_gui.py` | Tkinter GUI with embedded Matplotlib plot builder |
+| `archived/plotting_service.py` | gnuplot/matplotlib backend-agnostic plotting service |
+
+These are no longer part of the active workflow.  The core research flow is:
+`make` → `make run` → (optional) `gnuplot plots/plot_simv0.gp`.
