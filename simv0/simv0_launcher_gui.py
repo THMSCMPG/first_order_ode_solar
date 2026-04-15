@@ -23,6 +23,17 @@ from tkinter import ttk, messagebox, filedialog
 import matplotlib
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib import image as mpimg
+
+from plotting_service import (
+    PRESET_TEMPLATES,
+    PlotRequest,
+    PlottingService,
+    SeriesSpec,
+    apply_preset_to_request,
+    discover_dat_files,
+    format_stats_table,
+)
 
 # ---------------------------------------------------------------------------
 #  Retro palette  (Windows XP / early-2000s aesthetic, matching AURA-MFP)
@@ -112,6 +123,12 @@ class SimV0LauncherGUI:
         self.simv0_dir = simv0_dir or os.path.dirname(os.path.abspath(__file__))
         self._proc = None
         self._log_queue = queue.Queue()
+        self._plot_service = PlottingService(
+            allowed_data_dir=os.path.join(self.simv0_dir, "data")
+        )
+        self._pb_series = []
+        self._pb_last_result = None
+        self._pb_current_request = None
 
         self._build_ui()
         self._poll_log_queue()
@@ -455,7 +472,7 @@ class SimV0LauncherGUI:
 
     # ── Data Viewer tab ──────────────────────────────────────────────────────
 
-    # Output files available for viewing
+    # Fallback output files available for viewing
     _DAT_FILES = [
         "simv0_decoupled.dat",
         "simv0_coupled.dat",
@@ -463,6 +480,11 @@ class SimV0LauncherGUI:
         "simv0_spatial.dat",
         "simv0_diagnostic.dat",
     ]
+
+    def _list_dat_files(self):
+        data_dir = os.path.join(self.simv0_dir, "data")
+        files = discover_dat_files(data_dir)
+        return files or list(self._DAT_FILES)
 
     def _build_data_viewer_tab(self, parent):
         # ── Toolbar ──────────────────────────────────────────────────────────
@@ -478,9 +500,10 @@ class SimV0LauncherGUI:
             fg=PAL["header"],
         ).pack(side=tk.LEFT, padx=(4, 0), pady=4)
 
-        self._dv_file_var = tk.StringVar(value=self._DAT_FILES[0])
+        self._dv_files = self._list_dat_files()
+        self._dv_file_var = tk.StringVar(value=self._dv_files[0])
         dv_menu = tk.OptionMenu(
-            toolbar, self._dv_file_var, *self._DAT_FILES,
+            toolbar, self._dv_file_var, *self._dv_files,
             command=lambda _: self._dv_load(),
         )
         dv_menu.config(
@@ -493,8 +516,9 @@ class SimV0LauncherGUI:
         )
         dv_menu["menu"].config(font=FONT_LABEL, bg=PAL["gray"])
         dv_menu.pack(side=tk.LEFT, padx=4, pady=3)
+        self._dv_file_menu = dv_menu
 
-        _make_btn(toolbar, "↺  Refresh", self._dv_load, width=10
+        _make_btn(toolbar, "↺  Refresh", self._dv_refresh_and_load, width=10
                   ).pack(side=tk.LEFT, padx=4, pady=3)
 
         # Search / filter
@@ -615,6 +639,25 @@ class SimV0LauncherGUI:
             f"Loaded {len(rows)} rows × {len(headers)} columns  ·  {fname}"
         )
 
+    def _dv_refresh_files(self):
+        files = self._list_dat_files()
+        # Rebuild OptionMenu entries in-place
+        if hasattr(self, "_dv_file_var") and hasattr(self, "_dv_file_menu"):
+            menu = self._dv_file_menu["menu"]
+            menu.delete(0, tk.END)
+            def _select_file(v):
+                self._dv_file_var.set(v)
+                self._dv_load()
+            for f in files:
+                menu.add_command(label=f, command=lambda v=f: _select_file(v))
+            if self._dv_file_var.get() not in files:
+                self._dv_file_var.set(files[0])
+        self._dv_files = files
+
+    def _dv_refresh_and_load(self):
+        self._dv_refresh_files()
+        self._dv_load()
+
     def _dv_populate_rows(self, rows):
         """Insert a list of string-tuples into the Treeview."""
         self._dv_tree.delete(*self._dv_tree.get_children())
@@ -637,6 +680,8 @@ class SimV0LauncherGUI:
     # ── Plot Builder tab ─────────────────────────────────────────────────────
 
     _PLOT_TYPES  = ["line", "scatter", "bar"]
+    _PLOT_MODES  = ["2d", "3d"]
+    _BACKENDS    = ["auto", "gnuplot", "matplotlib"]
     _COLORS      = ["#33FF00", "#66CCFF", "#FF4444", "#FFCC00", "#FF88FF",
                     "#00FFCC", "#FFFFFF"]
     _COLOR_NAMES = ["Green", "Cyan", "Red", "Yellow", "Magenta", "Teal", "White"]
@@ -678,6 +723,8 @@ class SimV0LauncherGUI:
         btn_bar.pack_propagate(False)
         _make_btn(btn_bar, "Save Plot", self._pb_save, width=12
                   ).pack(side=tk.LEFT, padx=6, pady=3)
+        _make_btn(btn_bar, "Save Stats", self._pb_save_stats, width=12
+                  ).pack(side=tk.LEFT, padx=4, pady=3)
         _make_btn(btn_bar, "Clear",     self._pb_clear, width=8
                   ).pack(side=tk.LEFT, padx=4, pady=3)
         self._pb_save_status = tk.StringVar(value="")
@@ -689,6 +736,30 @@ class SimV0LauncherGUI:
             fg=PAL["success"],
             anchor="w",
         ).pack(side=tk.LEFT, padx=6)
+
+        stats_frame = tk.Frame(canvas_frame, bg=PAL["console_bg"])
+        stats_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Label(
+            stats_frame,
+            text="Statistics:",
+            font=FONT_SECTION,
+            bg=PAL["console_bg"],
+            fg=PAL["header"],
+            anchor="w",
+        ).pack(fill=tk.X, padx=6, pady=(4, 2))
+        self._pb_stats_text = tk.Text(
+            stats_frame,
+            height=8,
+            font=FONT_FIXED,
+            bg=PAL["console_bg"],
+            fg=PAL["phosphor"],
+            insertbackground=PAL["phosphor"],
+            relief=tk.SUNKEN,
+            bd=1,
+            wrap=tk.NONE,
+        )
+        self._pb_stats_text.pack(fill=tk.X, padx=6, pady=(0, 4))
+        self._pb_set_stats_text("No statistics yet.")
 
     def _pb_build_controls(self, parent):
         """Build the left-side control panel for the Plot Builder."""
@@ -709,9 +780,8 @@ class SimV0LauncherGUI:
             w.pack(fill=tk.X, padx=6, pady=(0, pady))
             return w
 
-        def _omenu(parent_fr, var, choices):
-            m = tk.OptionMenu(parent_fr, var, *choices,
-                              command=lambda _: self._pb_update_col_menus())
+        def _omenu(parent_fr, var, choices, cmd=None):
+            m = tk.OptionMenu(parent_fr, var, *choices, command=cmd)
             m.config(font=FONT_LABEL, bg=PAL["btn_bg"], fg=PAL["label_fg"],
                      activebackground=PAL["btn_active"], relief=tk.RAISED, bd=1)
             m["menu"].config(font=FONT_LABEL, bg=PAL["gray"])
@@ -725,26 +795,58 @@ class SimV0LauncherGUI:
             m["menu"].config(font=FONT_LABEL, bg=PAL["gray"])
             return m
 
-        # Data file
+        # Data files
         _sec("DATA SOURCE")
-        self._pb_file_var = tk.StringVar(value=self._DAT_FILES[0])
-        _row(parent, "Output file:", lambda p: _omenu(p, self._pb_file_var, self._DAT_FILES))
+        self._pb_files = self._list_dat_files()
+        files_frame = tk.Frame(parent, bg=PAL["gray"])
+        files_frame.pack(fill=tk.BOTH, padx=6, pady=2)
+        self._pb_file_list = tk.Listbox(
+            files_frame,
+            selectmode=tk.EXTENDED,
+            height=4,
+            exportselection=False,
+            font=FONT_FIXED,
+            bg=PAL["white"],
+            fg=PAL["label_fg"],
+        )
+        for f in self._pb_files:
+            self._pb_file_list.insert(tk.END, f)
+        self._pb_file_list.pack(fill=tk.BOTH, expand=True)
+        self._pb_file_list.bind("<<ListboxSelect>>", lambda *_: self._pb_update_col_menus())
+        if self._pb_files:
+            self._pb_file_list.selection_set(0)
+        _make_btn(parent, "↺ Refresh files", self._pb_refresh_files, width=18
+                  ).pack(padx=8, pady=(0, 4), fill=tk.X)
 
         # Axes
         _sec("AXES")
         _placeholder = ["(load file first)"]
         self._pb_xcol_var = tk.StringVar(value=_placeholder[0])
         self._pb_ycol_var = tk.StringVar(value=_placeholder[0])
-        self._pb_y2col_var = tk.StringVar(value="None")
+        self._pb_yerr_var = tk.StringVar(value="None")
+        self._pb_zcol_var = tk.StringVar(value="None")
 
         self._pb_xcol_menu = _row(parent, "X axis:", lambda p: _plain_omenu(p, self._pb_xcol_var, _placeholder))
-        self._pb_ycol_menu = _row(parent, "Y axis:", lambda p: _plain_omenu(p, self._pb_ycol_var, _placeholder))
-        self._pb_y2col_menu = _row(parent, "Y2 axis (opt.):", lambda p: _plain_omenu(p, self._pb_y2col_var, ["None"] + _placeholder))
+        self._pb_ycol_menu = _row(parent, "Y axis (series):", lambda p: _plain_omenu(p, self._pb_ycol_var, _placeholder))
+        self._pb_yerr_menu = _row(parent, "Y error (opt.):", lambda p: _plain_omenu(p, self._pb_yerr_var, ["None"] + _placeholder))
+        self._pb_zcol_menu = _row(parent, "Z axis (3D):", lambda p: _plain_omenu(p, self._pb_zcol_var, ["None"] + _placeholder))
+
+        self._pb_series_label_var = tk.StringVar(value="")
+        _row(parent, "Series label (opt.):", lambda p: tk.Entry(
+            p, textvariable=self._pb_series_label_var, font=FONT_FIXED,
+            bg=PAL["white"], fg=PAL["label_fg"], relief=tk.SUNKEN, bd=1
+        ))
 
         # Plot type
         _sec("STYLE")
+        self._pb_mode_var  = tk.StringVar(value=self._PLOT_MODES[0])
+        _row(parent, "Plot mode:", lambda p: _plain_omenu(p, self._pb_mode_var, self._PLOT_MODES))
+
         self._pb_type_var  = tk.StringVar(value=self._PLOT_TYPES[0])
         _row(parent, "Plot type:", lambda p: _plain_omenu(p, self._pb_type_var, self._PLOT_TYPES))
+
+        self._pb_backend_var = tk.StringVar(value=self._BACKENDS[0])
+        _row(parent, "Backend:", lambda p: _plain_omenu(p, self._pb_backend_var, self._BACKENDS))
 
         self._pb_color_var = tk.StringVar(value=self._COLOR_NAMES[0])
         _row(parent, "Color:", lambda p: _plain_omenu(p, self._pb_color_var, self._COLOR_NAMES))
@@ -755,107 +857,229 @@ class SimV0LauncherGUI:
         self._pb_lw_var = tk.StringVar(value="1.5")
         _row(parent, "Line width:", lambda p: _plain_omenu(p, self._pb_lw_var, self._LINE_WIDTHS))
 
+        self._pb_title_var = tk.StringVar(value="")
+        _row(parent, "Title:", lambda p: tk.Entry(
+            p, textvariable=self._pb_title_var, font=FONT_FIXED,
+            bg=PAL["white"], fg=PAL["label_fg"], relief=tk.SUNKEN, bd=1
+        ))
+
+        self._pb_include_stats_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            parent,
+            text="Compute statistics",
+            variable=self._pb_include_stats_var,
+            font=FONT_LABEL,
+            bg=PAL["gray"],
+            fg=PAL["label_fg"],
+            selectcolor=PAL["white"],
+            activebackground=PAL["gray"],
+            anchor="w",
+        ).pack(fill=tk.X, padx=6, pady=(2, 1))
+
+        # Presets
+        _sec("PRESETS")
+        preset_names = list(PRESET_TEMPLATES.keys())
+        self._pb_preset_var = tk.StringVar(value=preset_names[0] if preset_names else "None")
+        _row(parent, "Preset:", lambda p: _omenu(p, self._pb_preset_var, preset_names or ["None"]))
+        _make_btn(parent, "Apply preset", self._pb_apply_preset, width=18
+                  ).pack(padx=8, pady=2, fill=tk.X)
+
+        # Series list
+        _sec("SERIES")
+        self._pb_series_list = tk.Listbox(
+            parent,
+            selectmode=tk.BROWSE,
+            height=5,
+            exportselection=False,
+            font=FONT_FIXED,
+            bg=PAL["white"],
+            fg=PAL["label_fg"],
+        )
+        self._pb_series_list.pack(fill=tk.BOTH, padx=6, pady=2)
+        sbtn = tk.Frame(parent, bg=PAL["gray"])
+        sbtn.pack(fill=tk.X, padx=6, pady=(0, 2))
+        _make_btn(sbtn, "+ Add series", self._pb_add_series, width=12).pack(side=tk.LEFT, padx=2)
+        _make_btn(sbtn, "- Remove", self._pb_remove_series, width=10).pack(side=tk.LEFT, padx=2)
+
         # Build button
         tk.Frame(parent, bg=PAL["gray"], height=8).pack()
         _make_btn(parent, "▶  Build Plot", self._pb_build, width=18
                   ).pack(padx=8, pady=6, fill=tk.X)
 
-        # Load columns when file changes
-        self._pb_file_var.trace_add("write", lambda *_: self._pb_update_col_menus())
+        # Seed first series for convenience
         self._pb_update_col_menus()
 
     def _pb_update_col_menus(self):
-        """Reload column names from the selected file into the axis menus."""
-        fname = self._pb_file_var.get()
-        data_dir = os.path.join(self.simv0_dir, "data")
-        path = os.path.join(data_dir, fname)
-        headers, _ = _parse_dat_full(path, max_rows=0)
+        """Reload column names from the first selected file into axis menus."""
+        selected_files = self._pb_selected_files()
+        if not selected_files:
+            cols = ["(no data)"]
+            self._pb_set_menu_choices(self._pb_xcol_var, self._pb_xcol_menu, cols)
+            self._pb_set_menu_choices(self._pb_ycol_var, self._pb_ycol_menu, cols)
+            self._pb_set_menu_choices(self._pb_yerr_var, self._pb_yerr_menu, ["None"] + cols)
+            self._pb_set_menu_choices(self._pb_zcol_var, self._pb_zcol_menu, ["None"] + cols)
+            return
+        path = os.path.join(self.simv0_dir, "data", selected_files[0])
+        pdata = self._plot_service.parse_file(path, max_rows=0)
+        headers = pdata.headers
 
         cols = headers if headers else ["(no data)"]
         cols_with_none = ["None"] + cols
 
-        for var, menu_widget, choices in [
-            (self._pb_xcol_var,  self._pb_xcol_menu,  cols),
-            (self._pb_ycol_var,  self._pb_ycol_menu,  cols),
-            (self._pb_y2col_var, self._pb_y2col_menu, cols_with_none),
-        ]:
-            menu = menu_widget["menu"]
-            menu.delete(0, tk.END)
-            for c in choices:
-                menu.add_command(label=c, command=lambda v=c, sv=var: sv.set(v))
-            if choices:
-                var.set(choices[0])
+        self._pb_set_menu_choices(self._pb_xcol_var, self._pb_xcol_menu, cols)
+        self._pb_set_menu_choices(self._pb_ycol_var, self._pb_ycol_menu, cols)
+        self._pb_set_menu_choices(self._pb_yerr_var, self._pb_yerr_menu, cols_with_none)
+        self._pb_set_menu_choices(self._pb_zcol_var, self._pb_zcol_menu, cols_with_none)
 
-    def _pb_build(self):
-        """Build the plot from selected options."""
-        fname = self._pb_file_var.get()
-        data_dir = os.path.join(self.simv0_dir, "data")
-        path = os.path.join(data_dir, fname)
-        headers, rows = _parse_dat_full(path)
+    def _pb_set_menu_choices(self, var, menu_widget, choices):
+        menu = menu_widget["menu"]
+        menu.delete(0, tk.END)
+        for c in choices:
+            menu.add_command(label=c, command=lambda v=c, sv=var: sv.set(v))
+        if choices and var.get() not in choices:
+            var.set(choices[0])
 
-        if not headers or not rows:
-            messagebox.showerror("Plot Builder",
-                                 f"No data available in:\n{path}")
+    def _pb_selected_files(self):
+        return [self._pb_file_list.get(i) for i in self._pb_file_list.curselection()]
+
+    def _pb_refresh_files(self):
+        files = self._list_dat_files()
+        self._pb_file_list.delete(0, tk.END)
+        for f in files:
+            self._pb_file_list.insert(tk.END, f)
+        if files:
+            self._pb_file_list.selection_set(0)
+        self._plot_service.clear_cache()
+        self._pb_update_col_menus()
+
+    def _pb_add_series(self):
+        files = self._pb_selected_files()
+        if not files:
+            messagebox.showwarning("Plot Builder", "Select at least one data file.")
+            return
+        ycol = self._pb_ycol_var.get()
+        if not ycol or ycol in ("(no data)", "(load file first)"):
+            messagebox.showwarning("Plot Builder", "Select a valid Y column.")
             return
 
-        xcol = self._pb_xcol_var.get()
-        ycol = self._pb_ycol_var.get()
-        y2col = self._pb_y2col_var.get()
-        ptype = self._pb_type_var.get()
-        color = self._COLORS[self._COLOR_NAMES.index(self._pb_color_var.get())]
         marker = self._pb_marker_var.get()
         marker = None if marker == "None" else marker
+        y_error = self._pb_yerr_var.get()
+        y_error = None if y_error in ("None", "(no data)", "(load file first)") else y_error
+        zcol = self._pb_zcol_var.get()
+        zcol = None if zcol in ("None", "(no data)", "(load file first)") else zcol
+
         try:
-            lw = float(self._pb_lw_var.get())
+            line_width = float(self._pb_lw_var.get())
         except ValueError:
-            lw = 1.5
-
-        if xcol not in headers or ycol not in headers:
-            messagebox.showerror("Plot Builder", "Selected columns not found in data.")
+            messagebox.showerror("Plot Builder", "Line width must be numeric.")
             return
 
-        xi = headers.index(xcol)
-        yi = headers.index(ycol)
+        for fname in files:
+            label = self._pb_series_label_var.get().strip() or f"{fname}:{ycol}"
+            if len(files) > 1 and self._pb_series_label_var.get().strip():
+                label = f"{self._pb_series_label_var.get().strip()} [{fname}]"
+            spec = SeriesSpec(
+                file_path=os.path.join(self.simv0_dir, "data", fname),
+                y_column=ycol,
+                label=label,
+                color=self._COLORS[self._COLOR_NAMES.index(self._pb_color_var.get())],
+                marker=marker,
+                line_width=line_width,
+                yerr_column=y_error,
+                z_column=zcol,
+            )
+            self._pb_series.append(spec)
+            self._pb_series_list.insert(tk.END, self._pb_series_desc(spec))
 
-        try:
-            xdata = [float(r[xi]) for r in rows]
-            ydata = [float(r[yi]) for r in rows]
-        except (ValueError, IndexError) as exc:
-            messagebox.showerror("Plot Builder", f"Data conversion error:\n{exc}")
+    def _pb_remove_series(self):
+        sel = self._pb_series_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        del self._pb_series[idx]
+        self._pb_series_list.delete(idx)
+
+    def _pb_series_desc(self, spec):
+        eb = f" ±{spec.yerr_column}" if spec.yerr_column else ""
+        z = f" z={spec.z_column}" if spec.z_column else ""
+        return f"{os.path.basename(spec.file_path)}:{spec.y_column}{eb}{z}"
+
+    def _pb_apply_preset(self):
+        if not self._pb_series:
+            messagebox.showinfo("Plot Builder", "Add at least one series before applying presets.")
+            return
+        preset_name = self._pb_preset_var.get()
+        if preset_name not in PRESET_TEMPLATES:
+            messagebox.showwarning("Plot Builder", f"Unknown preset: {preset_name}")
+            return
+        req = self._pb_make_request(output_path=None)
+        req = apply_preset_to_request(req, preset_name)
+        self._pb_mode_var.set(req.plot_mode)
+        self._pb_type_var.set(req.plot_type)
+        self._pb_title_var.set(req.title)
+        if req.x_column:
+            self._pb_xcol_var.set(req.x_column)
+        self._set_status(f"Preset applied: {preset_name}")
+
+    def _pb_make_request(self, output_path=None):
+        title = self._pb_title_var.get().strip() or "simv0 plot"
+        return PlotRequest(
+            plot_mode=self._pb_mode_var.get(),
+            plot_type=self._pb_type_var.get(),
+            backend=self._pb_backend_var.get(),
+            x_column=self._pb_xcol_var.get(),
+            series=list(self._pb_series),
+            title=title,
+            x_label=self._pb_xcol_var.get(),
+            y_label=self._pb_series[0].y_column if self._pb_series else "",
+            z_label=self._pb_zcol_var.get() if self._pb_mode_var.get() == "3d" else None,
+            output_path=output_path,
+            output_format="png",
+            include_stats=self._pb_include_stats_var.get(),
+        )
+
+    def _pb_build(self):
+        """Build the plot from selected options via plotting service."""
+        if not self._pb_series:
+            messagebox.showwarning("Plot Builder", "Add at least one series before building.")
+            return
+        req = self._pb_make_request(output_path=None)
+        if req.plot_mode == "3d" and any(not s.z_column for s in req.series):
+            messagebox.showerror("Plot Builder", "3D mode requires a Z column for all series.")
             return
 
-        # Clear and replot
+        result = self._plot_service.render(req)
+        self._pb_current_request = req
+        self._pb_last_result = result
+        if not result.ok:
+            messagebox.showerror("Plot Builder", result.error)
+            self._pb_set_stats_text(format_stats_table(result.stats))
+            self._set_status("Plot build failed.")
+            return
+
+        # Display rendered image
         self._pb_fig.clear()
         ax = self._pb_fig.add_subplot(111)
         _style_axes(ax)
-
-        _plot_series(ax, xdata, ydata, ptype, color, marker, lw, ycol)
-
-        # Secondary Y axis
-        if y2col and y2col != "None" and y2col in headers:
-            y2i = headers.index(y2col)
-            try:
-                y2data = [float(r[y2i]) for r in rows]
-                ax2 = ax.twinx()
-                _style_axes(ax2, spine_color="#AAAAAA")
-                y2_color = self._COLORS[1]  # Cyan for secondary
-                _plot_series(ax2, xdata, y2data, ptype, y2_color, marker, lw, y2col)
-                ax2.set_ylabel(y2col, color=y2_color, fontsize=8)
-                ax2.tick_params(axis="y", labelcolor=y2_color, labelsize=7)
-            except (ValueError, IndexError):
-                pass
-
-        ax.set_xlabel(xcol, color=PAL["header"], fontsize=8)
-        ax.set_ylabel(ycol, color=color, fontsize=8)
-        title = f"{ycol}  vs  {xcol}  [{fname}]"
-        ax.set_title(title, color=PAL["title_fg"], fontsize=8, pad=6)
-        self._pb_fig.tight_layout(pad=1.2)
+        try:
+            img = mpimg.imread(result.output_path)
+            ax.imshow(img)
+            ax.set_axis_off()
+        except Exception:
+            ax.text(0.5, 0.5, "Plot rendered.\n(Preview unavailable)", ha="center", va="center", color=PAL["phosphor"])
+        self._pb_fig.tight_layout(pad=0.2)
         self._pb_canvas.draw()
+        self._pb_set_stats_text(format_stats_table(result.stats))
         self._pb_save_status.set("")
-        self._set_status(f"Plot built: {ycol} vs {xcol}")
+        self._set_status(f"Plot built via {result.backend_used}.")
+        self._log(f"Plot backend: {result.backend_used}", "header")
 
     def _pb_save(self):
-        """Export the current plot to data/plots/ as PNG/PDF."""
+        """Export the current plot via plotting service to PNG/PDF."""
+        if not self._pb_current_request:
+            messagebox.showwarning("Save Plot", "Build a plot first.")
+            return
         plots_dir = os.path.join(self.simv0_dir, "data", "plots")
         os.makedirs(plots_dir, exist_ok=True)
 
@@ -867,14 +1091,44 @@ class SimV0LauncherGUI:
         )
         if not path:
             return
+        req = self._pb_make_request(output_path=path)
+        req.output_format = "pdf" if path.lower().endswith(".pdf") else "png"
+        result = self._plot_service.render(req)
+        if not result.ok:
+            messagebox.showerror("Save Plot", f"Could not save file:\n{result.error}")
+            return
+        short = os.path.basename(path)
+        self._pb_save_status.set(f"Saved: {short}")
+        self._set_status(f"Plot saved to {path}")
+
+    def _pb_save_stats(self):
+        if not self._pb_last_result:
+            messagebox.showwarning("Save Stats", "Build a plot first.")
+            return
+        stats_dir = os.path.join(self.simv0_dir, "data", "plots")
+        os.makedirs(stats_dir, exist_ok=True)
+        path = filedialog.asksaveasfilename(
+            initialdir=stats_dir,
+            defaultextension=".txt",
+            filetypes=[("Text file", "*.txt")],
+            title="Save Statistics",
+        )
+        if not path:
+            return
+        text = self._pb_stats_text.get("1.0", tk.END).strip()
         try:
-            self._pb_fig.savefig(path, dpi=150, bbox_inches="tight",
-                                 facecolor=PAL["console_bg"])
-            short = os.path.basename(path)
-            self._pb_save_status.set(f"Saved: {short}")
-            self._set_status(f"Plot saved to {path}")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+            self._set_status(f"Stats saved to {path}")
+            self._pb_save_status.set(f"Saved: {os.path.basename(path)}")
         except OSError as exc:
-            messagebox.showerror("Save Plot", f"Could not save file:\n{exc}")
+            messagebox.showerror("Save Stats", f"Could not save file:\n{exc}")
+
+    def _pb_set_stats_text(self, text):
+        self._pb_stats_text.configure(state=tk.NORMAL)
+        self._pb_stats_text.delete("1.0", tk.END)
+        self._pb_stats_text.insert("1.0", text)
+        self._pb_stats_text.configure(state=tk.DISABLED)
 
     def _pb_clear(self):
         """Clear the embedded plot."""
@@ -882,6 +1136,11 @@ class SimV0LauncherGUI:
         ax = self._pb_fig.add_subplot(111)
         _style_axes(ax)
         self._pb_canvas.draw()
+        self._pb_series = []
+        self._pb_series_list.delete(0, tk.END)
+        self._pb_last_result = None
+        self._pb_current_request = None
+        self._pb_set_stats_text("No statistics yet.")
         self._pb_save_status.set("")
         self._set_status("Plot cleared.")
 
@@ -1022,7 +1281,9 @@ class SimV0LauncherGUI:
             self._log("Simulation completed successfully.", "success")
             self._set_status("Simulation done.")
             self._parse_and_display_results()
-            self.root.after(0, self._dv_load)   # auto-refresh data viewer
+            self.root.after(0, self._dv_refresh_and_load)   # auto-refresh data viewer
+            if hasattr(self, "_pb_refresh_files"):
+                self.root.after(0, self._pb_refresh_files)
         else:
             self._log("Simulation exited with errors.", "error")
             self._set_status("Simulation FAILED.")
