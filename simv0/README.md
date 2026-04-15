@@ -189,6 +189,41 @@ Produces five PNG images in `plots/`:
 
 ---
 
+## GUI plotting (advanced)
+
+The Tkinter launcher (`simv0_launcher_gui.py`) now includes a backend-agnostic
+plotting stack (`plotting_service.py`) with the following capabilities:
+
+- **Plot modes**: 2D multi-line/multi-file overlays and 3D plotting
+- **Backends**: `gnuplot` (primary) with automatic fallback to `matplotlib`
+- **Error bars**: optional per-series uncertainty column (`y ± yerr`)
+- **Unit-aware validation**: series are checked for compatible `header(unit)` Y units
+- **Statistics**: per-series `n`, mean, std, min, max, 95% CI, correlation `r`,
+  and linear regression slope/intercept against selected X
+- **Presets**: reusable preset templates for common workflows (comparison, power,
+  error bars, 3D)
+- **Export**: save generated plot (PNG/PDF) and save statistics (TXT)
+
+### Header and units convention
+
+Columns should follow the existing style:
+
+```text
+# t(s)  T(K)  WS(m/s)  ...
+```
+
+Unit parsing is based on `name(unit)`. Unitless columns are supported but mixed
+Y-units in one plot are rejected to prevent invalid comparisons.
+
+### Data ingestion behavior
+
+- The GUI dynamically discovers `.dat` files under `simv0/data/` (not a fixed list).
+- Missing files/columns and backend/runtime errors are reported in the GUI.
+- If `gnuplot` is unavailable in `PATH`, plotting automatically falls back to
+  `matplotlib`.
+
+---
+
 ## Example configurations
 
 | Config | h (s) | tol (K) | Mode | Method selected |
