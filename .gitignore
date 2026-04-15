@@ -15,3 +15,9 @@ Icon
 .com.apple.timemachine.donotpresent
 .AppleDB
 .AppleDesktop
+# simv0: exclude compiled binaries in Code_Dev subdirs
+Code_Dev/*/bte_ns_ode
+Code_Dev/*/rk4_ode
+Code_Dev/*/euler_ode
+Code_Dev/*/heun_ode
+Code_Dev/*/*_ode
