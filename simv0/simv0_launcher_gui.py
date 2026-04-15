@@ -216,9 +216,34 @@ class SimV0LauncherGUI:
             canvas.configure(scrollregion=canvas.bbox("all"))
             canvas.itemconfig(win_id, width=event.width)
 
+        def _on_mousewheel(event):
+            if getattr(event, "num", None) == 4:
+                delta = -1
+            elif getattr(event, "num", None) == 5:
+                delta = 1
+            elif getattr(event, "delta", 0):
+                delta = -1 if event.delta > 0 else 1
+            else:
+                return
+            canvas.yview_scroll(delta, "units")
+
+        def _bind_mousewheel(_event=None):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_mousewheel)
+            canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_mousewheel(_event=None):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+
         canvas.bind("<Configure>", _on_configure)
         inner.bind("<Configure>", lambda e: canvas.configure(
             scrollregion=canvas.bbox("all")))
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+        inner.bind("<Enter>", _bind_mousewheel)
+        inner.bind("<Leave>", _unbind_mousewheel)
 
         self._build_solver_params(inner)
         self._build_scenarios(inner)
