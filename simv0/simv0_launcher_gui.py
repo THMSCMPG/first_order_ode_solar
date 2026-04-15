@@ -141,6 +141,7 @@ class SimV0LauncherGUI:
         self.root.title("simv0 — ODE Integration Platform Launcher")
         self.root.configure(bg=PAL["navy"])
         self.root.resizable(True, True)
+        self.root.geometry("1200x850")
         self.root.minsize(780, 600)
 
         # ── Title bar ───────────────────────────────────────────────────────
@@ -730,7 +731,49 @@ class SimV0LauncherGUI:
         pane.add(canvas_frame, minsize=300)
 
         # ── Controls ─────────────────────────────────────────────────────────
-        self._pb_build_controls(ctrl_frame)
+        ctrl_canvas = tk.Canvas(ctrl_frame, bg=PAL["gray"], highlightthickness=0, bd=0)
+        ctrl_scrollbar = tk.Scrollbar(ctrl_frame, orient=tk.VERTICAL, command=ctrl_canvas.yview)
+        ctrl_canvas.configure(yscrollcommand=ctrl_scrollbar.set)
+        ctrl_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        ctrl_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ctrl_inner = tk.Frame(ctrl_canvas, bg=PAL["gray"])
+        ctrl_win_id = ctrl_canvas.create_window((0, 0), window=ctrl_inner, anchor="nw")
+
+        def _pb_ctrl_on_configure(event):
+            ctrl_canvas.configure(scrollregion=ctrl_canvas.bbox("all"))
+            ctrl_canvas.itemconfig(ctrl_win_id, width=event.width)
+
+        def _pb_ctrl_on_mousewheel(event):
+            if getattr(event, "num", None) == 4:
+                delta = -1
+            elif getattr(event, "num", None) == 5:
+                delta = 1
+            elif getattr(event, "delta", 0):
+                delta = -1 if event.delta > 0 else 1
+            else:
+                return
+            ctrl_canvas.yview_scroll(delta, "units")
+
+        def _pb_ctrl_bind_mousewheel(_event=None):
+            ctrl_canvas.bind_all("<MouseWheel>", _pb_ctrl_on_mousewheel)
+            ctrl_canvas.bind_all("<Button-4>", _pb_ctrl_on_mousewheel)
+            ctrl_canvas.bind_all("<Button-5>", _pb_ctrl_on_mousewheel)
+
+        def _pb_ctrl_unbind_mousewheel(_event=None):
+            ctrl_canvas.unbind_all("<MouseWheel>")
+            ctrl_canvas.unbind_all("<Button-4>")
+            ctrl_canvas.unbind_all("<Button-5>")
+
+        ctrl_canvas.bind("<Configure>", _pb_ctrl_on_configure)
+        ctrl_inner.bind("<Configure>", lambda e: ctrl_canvas.configure(
+            scrollregion=ctrl_canvas.bbox("all")))
+        ctrl_canvas.bind("<Enter>", _pb_ctrl_bind_mousewheel)
+        ctrl_canvas.bind("<Leave>", _pb_ctrl_unbind_mousewheel)
+        ctrl_inner.bind("<Enter>", _pb_ctrl_bind_mousewheel)
+        ctrl_inner.bind("<Leave>", _pb_ctrl_unbind_mousewheel)
+
+        self._pb_build_controls(ctrl_inner)
 
         # ── Embedded canvas ───────────────────────────────────────────────────
         self._pb_fig = Figure(figsize=(5, 4), dpi=96,
