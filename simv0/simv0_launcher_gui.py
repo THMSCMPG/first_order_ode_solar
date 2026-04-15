@@ -18,7 +18,11 @@ import subprocess
 import threading
 import queue
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk, messagebox, filedialog
+
+import matplotlib
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # ---------------------------------------------------------------------------
 #  Retro palette  (Windows XP / early-2000s aesthetic, matching AURA-MFP)
@@ -377,21 +381,53 @@ class SimV0LauncherGUI:
         _make_btn(btn_frame2, "Clear Log", self._clear_log, width=12
                   ).pack(side=tk.LEFT, padx=4, pady=4)
 
-    # ── Right console panel ──────────────────────────────────────────────────
+    # ── Right panel: tabbed notebook ─────────────────────────────────────────
 
     def _build_right(self, parent):
-        hdr = tk.Frame(parent, bg=PAL["navy_mid"], height=22)
-        hdr.pack(fill=tk.X, side=tk.TOP)
-        hdr.pack_propagate(False)
-        tk.Label(
-            hdr,
-            text="  Console Output",
+        # Apply retro styling to the ttk.Notebook
+        style = ttk.Style(parent)
+        style.theme_use("default")
+        style.configure(
+            "Retro.TNotebook",
+            background=PAL["navy"],
+            borderwidth=0,
+            tabmargins=[2, 2, 0, 0],
+        )
+        style.configure(
+            "Retro.TNotebook.Tab",
+            background=PAL["navy_mid"],
+            foreground=PAL["header"],
             font=FONT_SECTION,
-            bg=PAL["navy_mid"],
-            fg=PAL["header"],
-            anchor="w",
-        ).pack(fill=tk.X, padx=4)
+            padding=[8, 3],
+            borderwidth=1,
+        )
+        style.map(
+            "Retro.TNotebook.Tab",
+            background=[("selected", PAL["navy_dark"]), ("active", PAL["navy"])],
+            foreground=[("selected", PAL["title_fg"]), ("active", PAL["header"])],
+        )
 
+        self._notebook = ttk.Notebook(parent, style="Retro.TNotebook")
+        self._notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 1 – Data Viewer
+        data_frame = tk.Frame(self._notebook, bg=PAL["console_bg"])
+        self._notebook.add(data_frame, text="  Data Viewer  ")
+        self._build_data_viewer_tab(data_frame)
+
+        # Tab 2 – Plot Builder
+        plot_frame = tk.Frame(self._notebook, bg=PAL["console_bg"])
+        self._notebook.add(plot_frame, text="  Plot Builder  ")
+        self._build_plot_builder_tab(plot_frame)
+
+        # Tab 3 – Console Output  (existing behaviour)
+        console_frame = tk.Frame(self._notebook, bg=PAL["console_bg"])
+        self._notebook.add(console_frame, text="  Console  ")
+        self._build_console_tab(console_frame)
+
+    # ── Console tab ──────────────────────────────────────────────────────────
+
+    def _build_console_tab(self, parent):
         self.console = tk.Text(
             parent,
             font=FONT_CONSOLE,
@@ -404,16 +440,11 @@ class SimV0LauncherGUI:
             state=tk.DISABLED,
             takefocus=0,
         )
-
-        vsb = tk.Scrollbar(parent, orient=tk.VERTICAL,
-                           command=self.console.yview)
+        vsb = tk.Scrollbar(parent, orient=tk.VERTICAL, command=self.console.yview)
         self.console.configure(yscrollcommand=vsb.set)
-
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Colour tags
-        # Bold variant derived from FONT_CONSOLE (family + size + bold)
         font_console_bold = (FONT_CONSOLE[0], FONT_CONSOLE[1], "bold")
         self.console.tag_configure("header",  foreground=PAL["header"],  font=font_console_bold)
         self.console.tag_configure("success", foreground=PAL["success"])
@@ -421,6 +452,438 @@ class SimV0LauncherGUI:
         self.console.tag_configure("warning", foreground=PAL["warning"])
         self.console.tag_configure("dim",     foreground="#556B4F")
         self.console.tag_configure("normal",  foreground=PAL["phosphor"])
+
+    # ── Data Viewer tab ──────────────────────────────────────────────────────
+
+    # Output files available for viewing
+    _DAT_FILES = [
+        "simv0_decoupled.dat",
+        "simv0_coupled.dat",
+        "simv0_comparison.dat",
+        "simv0_spatial.dat",
+        "simv0_diagnostic.dat",
+    ]
+
+    def _build_data_viewer_tab(self, parent):
+        # ── Toolbar ──────────────────────────────────────────────────────────
+        toolbar = tk.Frame(parent, bg=PAL["navy_mid"], height=28)
+        toolbar.pack(fill=tk.X, side=tk.TOP)
+        toolbar.pack_propagate(False)
+
+        tk.Label(
+            toolbar,
+            text="  File:",
+            font=FONT_SECTION,
+            bg=PAL["navy_mid"],
+            fg=PAL["header"],
+        ).pack(side=tk.LEFT, padx=(4, 0), pady=4)
+
+        self._dv_file_var = tk.StringVar(value=self._DAT_FILES[0])
+        dv_menu = tk.OptionMenu(
+            toolbar, self._dv_file_var, *self._DAT_FILES,
+            command=lambda _: self._dv_load(),
+        )
+        dv_menu.config(
+            font=FONT_LABEL,
+            bg=PAL["btn_bg"],
+            fg=PAL["label_fg"],
+            activebackground=PAL["btn_active"],
+            relief=tk.RAISED,
+            bd=1,
+        )
+        dv_menu["menu"].config(font=FONT_LABEL, bg=PAL["gray"])
+        dv_menu.pack(side=tk.LEFT, padx=4, pady=3)
+
+        _make_btn(toolbar, "↺  Refresh", self._dv_load, width=10
+                  ).pack(side=tk.LEFT, padx=4, pady=3)
+
+        # Search / filter
+        tk.Label(
+            toolbar,
+            text="Filter:",
+            font=FONT_SECTION,
+            bg=PAL["navy_mid"],
+            fg=PAL["header"],
+        ).pack(side=tk.LEFT, padx=(12, 0), pady=4)
+        self._dv_filter_var = tk.StringVar()
+        self._dv_filter_var.trace_add("write", lambda *_: self._dv_apply_filter())
+        filter_entry = tk.Entry(
+            toolbar,
+            textvariable=self._dv_filter_var,
+            font=FONT_FIXED,
+            bg=PAL["white"],
+            fg=PAL["label_fg"],
+            insertbackground=PAL["label_fg"],
+            relief=tk.SUNKEN,
+            bd=1,
+            width=16,
+        )
+        filter_entry.pack(side=tk.LEFT, padx=4, pady=4)
+
+        # ── Treeview ─────────────────────────────────────────────────────────
+        tv_frame = tk.Frame(parent, bg=PAL["console_bg"])
+        tv_frame.pack(fill=tk.BOTH, expand=True)
+
+        style = ttk.Style(parent)
+        style.configure(
+            "Retro.Treeview",
+            background=PAL["console_bg"],
+            foreground=PAL["phosphor"],
+            fieldbackground=PAL["console_bg"],
+            font=FONT_CONSOLE,
+            rowheight=16,
+        )
+        style.configure(
+            "Retro.Treeview.Heading",
+            background=PAL["navy_mid"],
+            foreground=PAL["header"],
+            font=FONT_SECTION,
+            relief="flat",
+        )
+        style.map(
+            "Retro.Treeview",
+            background=[("selected", PAL["navy"])],
+            foreground=[("selected", PAL["title_fg"])],
+        )
+
+        self._dv_tree = ttk.Treeview(
+            tv_frame,
+            style="Retro.Treeview",
+            show="headings",
+            selectmode="browse",
+        )
+
+        vsb = tk.Scrollbar(tv_frame, orient=tk.VERTICAL,
+                           command=self._dv_tree.yview)
+        hsb = tk.Scrollbar(tv_frame, orient=tk.HORIZONTAL,
+                           command=self._dv_tree.xview)
+        self._dv_tree.configure(
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+        )
+
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        vsb.pack(side=tk.RIGHT,  fill=tk.Y)
+        self._dv_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Status label for data viewer
+        self._dv_status_var = tk.StringVar(value="No data loaded.")
+        tk.Label(
+            parent,
+            textvariable=self._dv_status_var,
+            font=FONT_FIXED,
+            bg=PAL["navy_dark"],
+            fg=PAL["header"],
+            anchor="w",
+            padx=6,
+        ).pack(fill=tk.X, side=tk.BOTTOM)
+
+        # Internal cache of all rows for filtering
+        self._dv_all_rows = []
+
+    def _dv_load(self):
+        """Parse the selected .dat file and populate the Treeview."""
+        fname = self._dv_file_var.get()
+        data_dir = os.path.join(self.simv0_dir, "data")
+        path = os.path.join(data_dir, fname)
+
+        headers, rows = _parse_dat_full(path)
+
+        # Clear existing columns/rows
+        self._dv_tree.delete(*self._dv_tree.get_children())
+        self._dv_tree["columns"] = headers if headers else []
+
+        if not headers:
+            self._dv_status_var.set(
+                f"File not found or empty: {fname}" if not os.path.isfile(path)
+                else f"No data in {fname}"
+            )
+            self._dv_all_rows = []
+            return
+
+        # Configure columns
+        for col in headers:
+            self._dv_tree.heading(col, text=col, anchor="e")
+            # Width heuristic: longer headers get more space
+            width = max(90, len(col) * 9 + 16)
+            self._dv_tree.column(col, width=width, anchor="e", minwidth=60, stretch=False)
+
+        self._dv_all_rows = rows
+        self._dv_filter_var.set("")  # reset filter
+        self._dv_populate_rows(rows)
+        self._dv_status_var.set(
+            f"Loaded {len(rows)} rows × {len(headers)} columns  ·  {fname}"
+        )
+
+    def _dv_populate_rows(self, rows):
+        """Insert a list of string-tuples into the Treeview."""
+        self._dv_tree.delete(*self._dv_tree.get_children())
+        for row in rows:
+            self._dv_tree.insert("", tk.END, values=row)
+
+    def _dv_apply_filter(self):
+        """Filter rows to those containing the search string in any column."""
+        term = self._dv_filter_var.get().strip().lower()
+        if not term:
+            self._dv_populate_rows(self._dv_all_rows)
+            return
+        filtered = [r for r in self._dv_all_rows
+                    if any(term in str(v).lower() for v in r)]
+        self._dv_populate_rows(filtered)
+        self._dv_status_var.set(
+            f"Showing {len(filtered)} / {len(self._dv_all_rows)} rows  (filter: '{term}')"
+        )
+
+    # ── Plot Builder tab ─────────────────────────────────────────────────────
+
+    _PLOT_TYPES  = ["line", "scatter", "bar"]
+    _COLORS      = ["#33FF00", "#66CCFF", "#FF4444", "#FFCC00", "#FF88FF",
+                    "#00FFCC", "#FFFFFF"]
+    _COLOR_NAMES = ["Green", "Cyan", "Red", "Yellow", "Magenta", "Teal", "White"]
+    _MARKERS     = ["None", "o", "s", "^", "D", "x", "+"]
+    _LINE_WIDTHS = ["0.5", "1.0", "1.5", "2.0", "2.5"]
+
+    def _build_plot_builder_tab(self, parent):
+        # Split: controls on left, canvas on right
+        pane = tk.PanedWindow(
+            parent,
+            orient=tk.HORIZONTAL,
+            bg=PAL["navy"],
+            sashwidth=4,
+            sashrelief=tk.RAISED,
+        )
+        pane.pack(fill=tk.BOTH, expand=True)
+
+        ctrl_frame   = tk.Frame(pane, bg=PAL["gray"], bd=0)
+        canvas_frame = tk.Frame(pane, bg=PAL["console_bg"], bd=0)
+        pane.add(ctrl_frame,   minsize=200, width=220)
+        pane.add(canvas_frame, minsize=300)
+
+        # ── Controls ─────────────────────────────────────────────────────────
+        self._pb_build_controls(ctrl_frame)
+
+        # ── Embedded canvas ───────────────────────────────────────────────────
+        self._pb_fig = Figure(figsize=(5, 4), dpi=96,
+                              facecolor=PAL["console_bg"])
+        self._pb_ax  = self._pb_fig.add_subplot(111)
+        _style_axes(self._pb_ax)
+
+        self._pb_canvas = FigureCanvasTkAgg(self._pb_fig, master=canvas_frame)
+        self._pb_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self._pb_canvas.draw()
+
+        # Save / clear buttons below the canvas
+        btn_bar = tk.Frame(canvas_frame, bg=PAL["navy_mid"], height=30)
+        btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        btn_bar.pack_propagate(False)
+        _make_btn(btn_bar, "Save Plot", self._pb_save, width=12
+                  ).pack(side=tk.LEFT, padx=6, pady=3)
+        _make_btn(btn_bar, "Clear",     self._pb_clear, width=8
+                  ).pack(side=tk.LEFT, padx=4, pady=3)
+        self._pb_save_status = tk.StringVar(value="")
+        tk.Label(
+            btn_bar,
+            textvariable=self._pb_save_status,
+            font=FONT_FIXED,
+            bg=PAL["navy_mid"],
+            fg=PAL["success"],
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=6)
+
+    def _pb_build_controls(self, parent):
+        """Build the left-side control panel for the Plot Builder."""
+
+        def _sec(text):
+            fr = tk.Frame(parent, bg=PAL["navy"], height=20)
+            fr.pack(fill=tk.X, padx=4, pady=(6, 1))
+            fr.pack_propagate(False)
+            tk.Label(fr, text=f"  {text}", font=FONT_SECTION,
+                     bg=PAL["navy"], fg=PAL["header"], anchor="w"
+                     ).pack(fill=tk.X, padx=2)
+
+        def _row(parent_fr, label, widget_factory, pady=2):
+            tk.Label(parent_fr, text=label, font=FONT_LABEL,
+                     bg=PAL["gray"], fg=PAL["label_fg"], anchor="w"
+                     ).pack(fill=tk.X, padx=6, pady=(pady, 0))
+            w = widget_factory(parent_fr)
+            w.pack(fill=tk.X, padx=6, pady=(0, pady))
+            return w
+
+        def _omenu(parent_fr, var, choices):
+            m = tk.OptionMenu(parent_fr, var, *choices,
+                              command=lambda _: self._pb_update_col_menus())
+            m.config(font=FONT_LABEL, bg=PAL["btn_bg"], fg=PAL["label_fg"],
+                     activebackground=PAL["btn_active"], relief=tk.RAISED, bd=1)
+            m["menu"].config(font=FONT_LABEL, bg=PAL["gray"])
+            return m
+
+        def _plain_omenu(parent_fr, var, choices, cmd=None):
+            kw = {"command": cmd} if cmd else {}
+            m = tk.OptionMenu(parent_fr, var, *choices, **kw)
+            m.config(font=FONT_LABEL, bg=PAL["btn_bg"], fg=PAL["label_fg"],
+                     activebackground=PAL["btn_active"], relief=tk.RAISED, bd=1)
+            m["menu"].config(font=FONT_LABEL, bg=PAL["gray"])
+            return m
+
+        # Data file
+        _sec("DATA SOURCE")
+        self._pb_file_var = tk.StringVar(value=self._DAT_FILES[0])
+        _row(parent, "Output file:", lambda p: _omenu(p, self._pb_file_var, self._DAT_FILES))
+
+        # Axes
+        _sec("AXES")
+        _placeholder = ["(load file first)"]
+        self._pb_xcol_var = tk.StringVar(value=_placeholder[0])
+        self._pb_ycol_var = tk.StringVar(value=_placeholder[0])
+        self._pb_y2col_var = tk.StringVar(value="None")
+
+        self._pb_xcol_menu = _row(parent, "X axis:", lambda p: _plain_omenu(p, self._pb_xcol_var, _placeholder))
+        self._pb_ycol_menu = _row(parent, "Y axis:", lambda p: _plain_omenu(p, self._pb_ycol_var, _placeholder))
+        self._pb_y2col_menu = _row(parent, "Y2 axis (opt.):", lambda p: _plain_omenu(p, self._pb_y2col_var, ["None"] + _placeholder))
+
+        # Plot type
+        _sec("STYLE")
+        self._pb_type_var  = tk.StringVar(value=self._PLOT_TYPES[0])
+        _row(parent, "Plot type:", lambda p: _plain_omenu(p, self._pb_type_var, self._PLOT_TYPES))
+
+        self._pb_color_var = tk.StringVar(value=self._COLOR_NAMES[0])
+        _row(parent, "Color:", lambda p: _plain_omenu(p, self._pb_color_var, self._COLOR_NAMES))
+
+        self._pb_marker_var = tk.StringVar(value=self._MARKERS[0])
+        _row(parent, "Marker:", lambda p: _plain_omenu(p, self._pb_marker_var, self._MARKERS))
+
+        self._pb_lw_var = tk.StringVar(value="1.5")
+        _row(parent, "Line width:", lambda p: _plain_omenu(p, self._pb_lw_var, self._LINE_WIDTHS))
+
+        # Build button
+        tk.Frame(parent, bg=PAL["gray"], height=8).pack()
+        _make_btn(parent, "▶  Build Plot", self._pb_build, width=18
+                  ).pack(padx=8, pady=6, fill=tk.X)
+
+        # Load columns when file changes
+        self._pb_file_var.trace_add("write", lambda *_: self._pb_update_col_menus())
+        self._pb_update_col_menus()
+
+    def _pb_update_col_menus(self):
+        """Reload column names from the selected file into the axis menus."""
+        fname = self._pb_file_var.get()
+        data_dir = os.path.join(self.simv0_dir, "data")
+        path = os.path.join(data_dir, fname)
+        headers, _ = _parse_dat_full(path, max_rows=0)
+
+        cols = headers if headers else ["(no data)"]
+        cols_with_none = ["None"] + cols
+
+        for var, menu_widget, choices in [
+            (self._pb_xcol_var,  self._pb_xcol_menu,  cols),
+            (self._pb_ycol_var,  self._pb_ycol_menu,  cols),
+            (self._pb_y2col_var, self._pb_y2col_menu, cols_with_none),
+        ]:
+            menu = menu_widget["menu"]
+            menu.delete(0, tk.END)
+            for c in choices:
+                menu.add_command(label=c, command=lambda v=c, sv=var: sv.set(v))
+            if choices:
+                var.set(choices[0])
+
+    def _pb_build(self):
+        """Build the plot from selected options."""
+        fname = self._pb_file_var.get()
+        data_dir = os.path.join(self.simv0_dir, "data")
+        path = os.path.join(data_dir, fname)
+        headers, rows = _parse_dat_full(path)
+
+        if not headers or not rows:
+            messagebox.showerror("Plot Builder",
+                                 f"No data available in:\n{path}")
+            return
+
+        xcol = self._pb_xcol_var.get()
+        ycol = self._pb_ycol_var.get()
+        y2col = self._pb_y2col_var.get()
+        ptype = self._pb_type_var.get()
+        color = self._COLORS[self._COLOR_NAMES.index(self._pb_color_var.get())]
+        marker = self._pb_marker_var.get()
+        marker = None if marker == "None" else marker
+        try:
+            lw = float(self._pb_lw_var.get())
+        except ValueError:
+            lw = 1.5
+
+        if xcol not in headers or ycol not in headers:
+            messagebox.showerror("Plot Builder", "Selected columns not found in data.")
+            return
+
+        xi = headers.index(xcol)
+        yi = headers.index(ycol)
+
+        try:
+            xdata = [float(r[xi]) for r in rows]
+            ydata = [float(r[yi]) for r in rows]
+        except (ValueError, IndexError) as exc:
+            messagebox.showerror("Plot Builder", f"Data conversion error:\n{exc}")
+            return
+
+        # Clear and replot
+        self._pb_fig.clear()
+        ax = self._pb_fig.add_subplot(111)
+        _style_axes(ax)
+
+        _plot_series(ax, xdata, ydata, ptype, color, marker, lw, ycol)
+
+        # Secondary Y axis
+        if y2col and y2col != "None" and y2col in headers:
+            y2i = headers.index(y2col)
+            try:
+                y2data = [float(r[y2i]) for r in rows]
+                ax2 = ax.twinx()
+                _style_axes(ax2, spine_color="#AAAAAA")
+                y2_color = self._COLORS[1]  # Cyan for secondary
+                _plot_series(ax2, xdata, y2data, ptype, y2_color, marker, lw, y2col)
+                ax2.set_ylabel(y2col, color=y2_color, fontsize=8)
+                ax2.tick_params(axis="y", labelcolor=y2_color, labelsize=7)
+            except (ValueError, IndexError):
+                pass
+
+        ax.set_xlabel(xcol, color=PAL["header"], fontsize=8)
+        ax.set_ylabel(ycol, color=color, fontsize=8)
+        title = f"{ycol}  vs  {xcol}  [{fname}]"
+        ax.set_title(title, color=PAL["title_fg"], fontsize=8, pad=6)
+        self._pb_fig.tight_layout(pad=1.2)
+        self._pb_canvas.draw()
+        self._pb_save_status.set("")
+        self._set_status(f"Plot built: {ycol} vs {xcol}")
+
+    def _pb_save(self):
+        """Export the current plot to data/plots/ as PNG/PDF."""
+        plots_dir = os.path.join(self.simv0_dir, "data", "plots")
+        os.makedirs(plots_dir, exist_ok=True)
+
+        path = filedialog.asksaveasfilename(
+            initialdir=plots_dir,
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("PDF document", "*.pdf")],
+            title="Save Plot",
+        )
+        if not path:
+            return
+        try:
+            self._pb_fig.savefig(path, dpi=150, bbox_inches="tight",
+                                 facecolor=PAL["console_bg"])
+            short = os.path.basename(path)
+            self._pb_save_status.set(f"Saved: {short}")
+            self._set_status(f"Plot saved to {path}")
+        except OSError as exc:
+            messagebox.showerror("Save Plot", f"Could not save file:\n{exc}")
+
+    def _pb_clear(self):
+        """Clear the embedded plot."""
+        self._pb_fig.clear()
+        ax = self._pb_fig.add_subplot(111)
+        _style_axes(ax)
+        self._pb_canvas.draw()
+        self._pb_save_status.set("")
+        self._set_status("Plot cleared.")
 
     # -----------------------------------------------------------------------
     #  Console helpers
@@ -559,6 +1022,7 @@ class SimV0LauncherGUI:
             self._log("Simulation completed successfully.", "success")
             self._set_status("Simulation done.")
             self._parse_and_display_results()
+            self.root.after(0, self._dv_load)   # auto-refresh data viewer
         else:
             self._log("Simulation exited with errors.", "error")
             self._set_status("Simulation FAILED.")
@@ -689,8 +1153,78 @@ def _parse_dat_file(path):
 
 
 # ---------------------------------------------------------------------------
-#  Entry point
+#  Full .dat parser — returns (headers, rows) for Treeview / plot use
 # ---------------------------------------------------------------------------
+
+def _parse_dat_full(path, max_rows=None):
+    """
+    Parse a simv0 .dat file and return (headers, rows).
+
+    headers : list[str]  — column names from the last #-comment header line
+    rows    : list[tuple[str]]  — formatted numeric strings, right-aligned
+
+    Comment lines (# …) and blank lines are skipped from data rows.
+    If max_rows==0, only headers are returned (no rows read).
+    """
+    if not os.path.isfile(path):
+        return [], []
+
+    headers = []
+    rows = []
+
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                parts = line.lstrip("#").split()
+                if parts:
+                    headers = parts
+                continue
+            if max_rows == 0:
+                continue
+            try:
+                vals = [float(x) for x in line.split()]
+            except ValueError:
+                continue
+            # Format for display: up to 8 sig-figs, avoid clutter
+            rows.append(tuple(f"{v:.6g}" for v in vals))
+            if max_rows and len(rows) >= max_rows:
+                break
+
+    return headers, rows
+
+
+# ---------------------------------------------------------------------------
+#  Matplotlib helpers
+# ---------------------------------------------------------------------------
+
+def _style_axes(ax, spine_color=None):
+    """Apply the retro dark theme to a matplotlib Axes."""
+    spine_color = spine_color or PAL["navy_mid"]
+    ax.set_facecolor(PAL["console_bg"])
+    ax.tick_params(colors=PAL["phosphor"], labelsize=7)
+    ax.xaxis.label.set_color(PAL["header"])
+    ax.yaxis.label.set_color(PAL["phosphor"])
+    for spine in ax.spines.values():
+        spine.set_edgecolor(spine_color)
+    ax.grid(color="#1A2E1A", linestyle="--", linewidth=0.5, alpha=0.7)
+
+
+def _plot_series(ax, xdata, ydata, ptype, color, marker, lw, label):
+    """Dispatch a plot call based on ptype."""
+    kw_shared = {"label": label, "color": color}
+    if ptype == "scatter":
+        ax.scatter(xdata, ydata, marker=marker or "o", s=36, **kw_shared)
+    elif ptype == "bar":
+        ax.bar(xdata, ydata, color=color, alpha=0.85, label=label)
+    else:  # line (default)
+        ax.plot(xdata, ydata, linewidth=lw, marker=marker,
+                markersize=4 if marker else 0, **kw_shared)
+
+
+
 
 def launch(simv0_dir=None):
     """Create the Tk root window and start the event loop."""
