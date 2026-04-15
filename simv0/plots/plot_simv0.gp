@@ -12,7 +12,7 @@
 #    05_power_output.png            : Electrical power (all modes)
 # ===========================================================================
 
-set terminal png size 1200,700 enhanced font "Helvetica,12"
+set terminal png size 1200,700
 set style data lines
 set grid
 set xrange [0:86400]
