@@ -202,6 +202,37 @@ def _safe_std(vals: Sequence[float]) -> float:
     return statistics.stdev(vals) if len(vals) > 1 else 0.0
 
 
+def _extract_xy(rows: Sequence[Sequence[float]], xi: int, yi: int) -> Tuple[List[float], List[float]]:
+    x: List[float] = []
+    y: List[float] = []
+    need = max(xi, yi)
+    for r in rows:
+        if len(r) <= need:
+            continue
+        x.append(r[xi])
+        y.append(r[yi])
+    return x, y
+
+
+def _extract_xye(rows: Sequence[Sequence[float]], xi: int, yi: int, ei: int) -> Tuple[List[float], List[float], List[float]]:
+    x: List[float] = []
+    y: List[float] = []
+    e: List[float] = []
+    need = max(xi, yi, ei)
+    for r in rows:
+        if len(r) <= need:
+            continue
+        x.append(r[xi])
+        y.append(r[yi])
+        e.append(r[ei])
+    return x, y, e
+
+
+def _gp_quote(text: str) -> str:
+    safe = text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\r", " ")
+    return f"\"{safe}\""
+
+
 def _linreg(x: Sequence[float], y: Sequence[float]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     if len(x) < 2 or len(x) != len(y):
         return None, None, None
@@ -231,7 +262,7 @@ def compute_stats(label: str, x: Sequence[float], y: Sequence[float]) -> SeriesS
     mean = statistics.mean(y)
     std = _safe_std(y)
     sem = std / math.sqrt(n) if n > 1 else 0.0
-    ci = 1.96 * sem
+    ci = 1.96 * sem  # Approximate 95% CI using standard normal z-score.
     r, slope, intercept = _linreg(x, y)
 
     return SeriesStats(
@@ -312,8 +343,7 @@ class PlottingService:
                 pdata = parsed_by_file[s.file_path]
                 xi = pdata.header_index(req.x_column)
                 yi = pdata.header_index(s.y_column)
-                x = [r[xi] for r in pdata.rows if len(r) > max(xi, yi)]
-                y = [r[yi] for r in pdata.rows if len(r) > max(xi, yi)]
+                x, y = _extract_xy(pdata.rows, xi, yi)
                 stats.append(compute_stats(s.label, x, y))
 
         backend_order = [req.backend]
@@ -346,38 +376,42 @@ class PlottingService:
 
         script_lines = [
             term,
-            f"set output '{out_path.replace('\\', '/')}'",
+            f"set output {_gp_quote(out_path.replace('\\', '/'))}",
             "set grid",
             "set key left top",
-            f"set title '{(req.title or 'simv0 plot').replace("'", "")} '".rstrip(),
-            f"set xlabel '{(req.x_label or req.x_column).replace("'", "")}'",
+            f"set title {_gp_quote(req.title or 'simv0 plot')}",
+            f"set xlabel {_gp_quote(req.x_label or req.x_column)}",
         ]
 
         ylabel = req.y_label or req.series[0].y_column
-        script_lines.append(f"set ylabel '{ylabel.replace("'", "")}'")
+        script_lines.append(f"set ylabel {_gp_quote(ylabel)}")
 
         if req.plot_mode == "3d":
             zlabel = req.z_label or "Z"
-            script_lines.append(f"set zlabel '{zlabel.replace("'", "")}'")
+            script_lines.append(f"set zlabel {_gp_quote(zlabel)}")
 
         plots: List[str] = []
         for s in req.series:
             pdata = parsed_by_file[s.file_path]
             xi = pdata.header_index(req.x_column) + 1
             yi = pdata.header_index(s.y_column) + 1
-            path = s.file_path.replace("\\", "/")
+            real_path = os.path.realpath(s.file_path)
+            if (not os.path.isfile(real_path)) or (not real_path.lower().endswith(".dat")):
+                return PlotResult(ok=False, backend_used="gnuplot", output_path=None,
+                                  error=f"Invalid data source for series '{s.label}'")
+            path = real_path.replace("\\", "/")
             if req.plot_mode == "3d":
                 if not s.z_column or s.z_column not in pdata.headers:
                     return PlotResult(ok=False, backend_used="gnuplot", output_path=None,
                                       error=f"Z column missing for series '{s.label}'")
                 zi = pdata.header_index(s.z_column) + 1
                 style = "with points pt 7" if req.plot_type == "scatter" else "with lines"
-                plots.append(f"'{path}' using {xi}:{yi}:{zi} {style} lw {s.line_width} title '{s.label}'")
+                plots.append(f"{_gp_quote(path)} using {xi}:{yi}:{zi} {style} lw {s.line_width} title {_gp_quote(s.label)}")
             else:
                 if s.yerr_column and s.yerr_column in pdata.headers:
                     ei = pdata.header_index(s.yerr_column) + 1
                     style = "with yerrorbars"
-                    plots.append(f"'{path}' using {xi}:{yi}:{ei} {style} lw {s.line_width} title '{s.label}'")
+                    plots.append(f"{_gp_quote(path)} using {xi}:{yi}:{ei} {style} lw {s.line_width} title {_gp_quote(s.label)}")
                 else:
                     if req.plot_type == "scatter":
                         style = "with points pt 7"
@@ -385,7 +419,7 @@ class PlottingService:
                         style = "with boxes"
                     else:
                         style = "with lines"
-                    plots.append(f"'{path}' using {xi}:{yi} {style} lw {s.line_width} title '{s.label}'")
+                    plots.append(f"{_gp_quote(path)} using {xi}:{yi} {style} lw {s.line_width} title {_gp_quote(s.label)}")
 
         cmd = "splot" if req.plot_mode == "3d" else "plot"
         script_lines.append(f"{cmd} " + ", \\\n  ".join(plots))
@@ -418,8 +452,7 @@ class PlottingService:
             pdata = parsed_by_file[s.file_path]
             xi = pdata.header_index(req.x_column)
             yi = pdata.header_index(s.y_column)
-            x = [r[xi] for r in pdata.rows if len(r) > max(xi, yi)]
-            y = [r[yi] for r in pdata.rows if len(r) > max(xi, yi)]
+            x, y = _extract_xy(pdata.rows, xi, yi)
 
             if req.plot_mode == "3d":
                 if not s.z_column or s.z_column not in pdata.headers:
@@ -435,9 +468,8 @@ class PlottingService:
             else:
                 if s.yerr_column and s.yerr_column in pdata.headers:
                     ei = pdata.header_index(s.yerr_column)
-                    yerr = [r[ei] for r in pdata.rows if len(r) > max(xi, yi, ei)]
-                    n = min(len(x), len(y), len(yerr))
-                    ax.errorbar(x[:n], y[:n], yerr=yerr[:n], label=s.label, color=s.color,
+                    x_err, y_err, y_error = _extract_xye(pdata.rows, xi, yi, ei)
+                    ax.errorbar(x_err, y_err, yerr=y_error, label=s.label, color=s.color,
                                 linewidth=s.line_width, marker=s.marker or "o", markersize=3, capsize=2)
                 elif req.plot_type == "scatter":
                     ax.scatter(x, y, label=s.label, c=s.color, marker=s.marker or "o", s=14)

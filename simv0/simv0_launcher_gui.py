@@ -646,8 +646,11 @@ class SimV0LauncherGUI:
         if hasattr(self, "_dv_file_var") and hasattr(self, "_dv_file_menu"):
             menu = self._dv_file_menu["menu"]
             menu.delete(0, tk.END)
+            def _select_file(v):
+                self._dv_file_var.set(v)
+                self._dv_load()
             for f in files:
-                menu.add_command(label=f, command=lambda v=f: (self._dv_file_var.set(v), self._dv_load()))
+                menu.add_command(label=f, command=lambda v=f: _select_file(v))
             if self._dv_file_var.get() not in files:
                 self._dv_file_var.set(files[0])
         self._dv_files = files
@@ -860,7 +863,7 @@ class SimV0LauncherGUI:
         self._pb_include_stats_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             parent,
-            text="Compute statistics (mean/std/CI/correlation/regression)",
+            text="Compute statistics",
             variable=self._pb_include_stats_var,
             font=FONT_LABEL,
             bg=PAL["gray"],
@@ -958,8 +961,8 @@ class SimV0LauncherGUI:
 
         marker = self._pb_marker_var.get()
         marker = None if marker == "None" else marker
-        yerr = self._pb_yerr_var.get()
-        yerr = None if yerr in ("None", "(no data)", "(load file first)") else yerr
+        y_error = self._pb_yerr_var.get()
+        y_error = None if y_error in ("None", "(no data)", "(load file first)") else y_error
         zcol = self._pb_zcol_var.get()
         zcol = None if zcol in ("None", "(no data)", "(load file first)") else zcol
 
@@ -974,7 +977,7 @@ class SimV0LauncherGUI:
                 color=self._COLORS[self._COLOR_NAMES.index(self._pb_color_var.get())],
                 marker=marker,
                 line_width=float(self._pb_lw_var.get()),
-                yerr_column=yerr,
+                yerr_column=y_error,
                 z_column=zcol,
             )
             self._pb_series.append(spec)
