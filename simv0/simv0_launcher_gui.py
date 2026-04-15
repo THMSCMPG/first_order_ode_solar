@@ -123,7 +123,9 @@ class SimV0LauncherGUI:
         self.simv0_dir = simv0_dir or os.path.dirname(os.path.abspath(__file__))
         self._proc = None
         self._log_queue = queue.Queue()
-        self._plot_service = PlottingService()
+        self._plot_service = PlottingService(
+            allowed_data_dir=os.path.join(self.simv0_dir, "data")
+        )
         self._pb_series = []
         self._pb_last_result = None
         self._pb_current_request = None
@@ -516,7 +518,7 @@ class SimV0LauncherGUI:
         dv_menu.pack(side=tk.LEFT, padx=4, pady=3)
         self._dv_file_menu = dv_menu
 
-        _make_btn(toolbar, "↺  Refresh", self._dv_load, width=10
+        _make_btn(toolbar, "↺  Refresh", self._dv_refresh_and_load, width=10
                   ).pack(side=tk.LEFT, padx=4, pady=3)
 
         # Search / filter
@@ -605,7 +607,6 @@ class SimV0LauncherGUI:
 
     def _dv_load(self):
         """Parse the selected .dat file and populate the Treeview."""
-        self._dv_refresh_files()
         fname = self._dv_file_var.get()
         data_dir = os.path.join(self.simv0_dir, "data")
         path = os.path.join(data_dir, fname)
@@ -640,8 +641,6 @@ class SimV0LauncherGUI:
 
     def _dv_refresh_files(self):
         files = self._list_dat_files()
-        if not files:
-            files = list(self._DAT_FILES)
         # Rebuild OptionMenu entries in-place
         if hasattr(self, "_dv_file_var") and hasattr(self, "_dv_file_menu"):
             menu = self._dv_file_menu["menu"]
@@ -654,6 +653,10 @@ class SimV0LauncherGUI:
             if self._dv_file_var.get() not in files:
                 self._dv_file_var.set(files[0])
         self._dv_files = files
+
+    def _dv_refresh_and_load(self):
+        self._dv_refresh_files()
+        self._dv_load()
 
     def _dv_populate_rows(self, rows):
         """Insert a list of string-tuples into the Treeview."""
@@ -966,6 +969,12 @@ class SimV0LauncherGUI:
         zcol = self._pb_zcol_var.get()
         zcol = None if zcol in ("None", "(no data)", "(load file first)") else zcol
 
+        try:
+            line_width = float(self._pb_lw_var.get())
+        except ValueError:
+            messagebox.showerror("Plot Builder", "Line width must be numeric.")
+            return
+
         for fname in files:
             label = self._pb_series_label_var.get().strip() or f"{fname}:{ycol}"
             if len(files) > 1 and self._pb_series_label_var.get().strip():
@@ -976,7 +985,7 @@ class SimV0LauncherGUI:
                 label=label,
                 color=self._COLORS[self._COLOR_NAMES.index(self._pb_color_var.get())],
                 marker=marker,
-                line_width=float(self._pb_lw_var.get()),
+                line_width=line_width,
                 yerr_column=y_error,
                 z_column=zcol,
             )
@@ -1000,14 +1009,18 @@ class SimV0LauncherGUI:
         if not self._pb_series:
             messagebox.showinfo("Plot Builder", "Add at least one series before applying presets.")
             return
+        preset_name = self._pb_preset_var.get()
+        if preset_name not in PRESET_TEMPLATES:
+            messagebox.showwarning("Plot Builder", f"Unknown preset: {preset_name}")
+            return
         req = self._pb_make_request(output_path=None)
-        req = apply_preset_to_request(req, self._pb_preset_var.get())
+        req = apply_preset_to_request(req, preset_name)
         self._pb_mode_var.set(req.plot_mode)
         self._pb_type_var.set(req.plot_type)
         self._pb_title_var.set(req.title)
         if req.x_column:
             self._pb_xcol_var.set(req.x_column)
-        self._set_status(f"Preset applied: {self._pb_preset_var.get()}")
+        self._set_status(f"Preset applied: {preset_name}")
 
     def _pb_make_request(self, output_path=None):
         title = self._pb_title_var.get().strip() or "simv0 plot"
@@ -1268,7 +1281,7 @@ class SimV0LauncherGUI:
             self._log("Simulation completed successfully.", "success")
             self._set_status("Simulation done.")
             self._parse_and_display_results()
-            self.root.after(0, self._dv_load)   # auto-refresh data viewer
+            self.root.after(0, self._dv_refresh_and_load)   # auto-refresh data viewer
             if hasattr(self, "_pb_refresh_files"):
                 self.root.after(0, self._pb_refresh_files)
         else:

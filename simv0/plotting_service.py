@@ -23,6 +23,7 @@ from matplotlib.figure import Figure
 
 
 _HEADER_RE = re.compile(r"^(?P<name>[^()]+?)(?:\((?P<unit>[^()]+)\))?$")
+_STATS_TABLE_SEPARATOR = 96
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,20 @@ def _extract_xye(rows: Sequence[Sequence[float]], xi: int, yi: int, ei: int) -> 
     return x, y, e
 
 
+def _extract_xyz(rows: Sequence[Sequence[float]], xi: int, yi: int, zi: int) -> Tuple[List[float], List[float], List[float]]:
+    x: List[float] = []
+    y: List[float] = []
+    z: List[float] = []
+    need = max(xi, yi, zi)
+    for r in rows:
+        if len(r) <= need:
+            continue
+        x.append(r[xi])
+        y.append(r[yi])
+        z.append(r[zi])
+    return x, y, z
+
+
 def _gp_quote(text: str) -> str:
     safe = text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\r", " ")
     return f"\"{safe}\""
@@ -262,7 +277,9 @@ def compute_stats(label: str, x: Sequence[float], y: Sequence[float]) -> SeriesS
     mean = statistics.mean(y)
     std = _safe_std(y)
     sem = std / math.sqrt(n) if n > 1 else 0.0
-    ci = 1.96 * sem  # Approximate 95% CI using standard normal z-score.
+    # Approximate 95% CI using standard normal z-score; less accurate than
+    # t-distribution for very small sample sizes.
+    ci = 1.96 * sem
     r, slope, intercept = _linreg(x, y)
 
     return SeriesStats(
@@ -285,7 +302,7 @@ def format_stats_table(stats: Sequence[SeriesStats]) -> str:
         return "No statistics available."
     lines = [
         "label | n | mean | std | min | max | 95% CI | r | slope | intercept",
-        "-" * 96,
+        "-" * _STATS_TABLE_SEPARATOR,
     ]
     for s in stats:
         ci_txt = f"[{s.ci95_low:.5g}, {s.ci95_high:.5g}]"
@@ -300,8 +317,9 @@ def format_stats_table(stats: Sequence[SeriesStats]) -> str:
 
 
 class PlottingService:
-    def __init__(self):
+    def __init__(self, allowed_data_dir: Optional[str] = None):
         self._cache: Dict[str, ParsedData] = {}
+        self.allowed_data_dir = os.path.realpath(allowed_data_dir) if allowed_data_dir else None
 
     def parse_file(self, path: str, max_rows: Optional[int] = None) -> ParsedData:
         key = f"{path}:{max_rows}"
@@ -399,6 +417,9 @@ class PlottingService:
             if (not os.path.isfile(real_path)) or (not real_path.lower().endswith(".dat")):
                 return PlotResult(ok=False, backend_used="gnuplot", output_path=None,
                                   error=f"Invalid data source for series '{s.label}'")
+            if self.allowed_data_dir and not real_path.startswith(self.allowed_data_dir + os.sep):
+                return PlotResult(ok=False, backend_used="gnuplot", output_path=None,
+                                  error=f"Data source outside allowed directory for series '{s.label}'")
             path = real_path.replace("\\", "/")
             if req.plot_mode == "3d":
                 if not s.z_column or s.z_column not in pdata.headers:
@@ -430,11 +451,19 @@ class PlottingService:
             gp_path = tf.name
 
         try:
-            run = subprocess.run(["gnuplot", gp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            run = subprocess.run(
+                ["gnuplot", gp_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
             if run.returncode != 0:
                 err = (run.stderr or run.stdout or "gnuplot failed").strip()
                 return PlotResult(ok=False, backend_used="gnuplot", output_path=None, error=err)
             return PlotResult(ok=True, backend_used="gnuplot", output_path=out_path)
+        except subprocess.TimeoutExpired:
+            return PlotResult(ok=False, backend_used="gnuplot", output_path=None, error="gnuplot timed out")
         finally:
             try:
                 os.remove(gp_path)
@@ -459,7 +488,7 @@ class PlottingService:
                     return PlotResult(ok=False, backend_used="matplotlib", output_path=None,
                                       error=f"Z column missing for series '{s.label}'")
                 zi = pdata.header_index(s.z_column)
-                z = [r[zi] for r in pdata.rows if len(r) > max(xi, yi, zi)]
+                x, y, z = _extract_xyz(pdata.rows, xi, yi, zi)
                 if req.plot_type == "scatter":
                     ax.scatter(x, y, z, label=s.label, c=s.color, marker=s.marker or "o", s=14)
                 else:
