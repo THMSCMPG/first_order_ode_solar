@@ -129,6 +129,9 @@ class SimV0LauncherGUI:
         self._pb_series = []
         self._pb_last_result = None
         self._pb_current_request = None
+        self._pb_plot_tabs = []
+        self._pb_editing_series_idx = None
+        self._pb_live_edit_guard = False
 
         self._build_ui()
         self._poll_log_queue()
@@ -141,8 +144,8 @@ class SimV0LauncherGUI:
         self.root.title("simv0 — ODE Integration Platform Launcher")
         self.root.configure(bg=PAL["navy"])
         self.root.resizable(True, True)
-        self.root.geometry("1200x850")
-        self.root.minsize(780, 600)
+        self.root.geometry("1400x950")
+        self.root.minsize(820, 640)
 
         # ── Title bar ───────────────────────────────────────────────────────
         title_frame = tk.Frame(self.root, bg=PAL["navy_dark"], height=48)
@@ -715,7 +718,7 @@ class SimV0LauncherGUI:
     _LINE_WIDTHS = ["0.5", "1.0", "1.5", "2.0", "2.5"]
 
     def _build_plot_builder_tab(self, parent):
-        # Split: controls on left, canvas on right
+        # Split: controls on left, plot area on right
         pane = tk.PanedWindow(
             parent,
             orient=tk.HORIZONTAL,
@@ -727,10 +730,10 @@ class SimV0LauncherGUI:
 
         ctrl_frame   = tk.Frame(pane, bg=PAL["gray"], bd=0)
         canvas_frame = tk.Frame(pane, bg=PAL["console_bg"], bd=0)
-        pane.add(ctrl_frame,   minsize=200, width=220)
+        pane.add(ctrl_frame,   minsize=220, width=290)
         pane.add(canvas_frame, minsize=300)
 
-        # ── Controls ─────────────────────────────────────────────────────────
+        # ── Controls (scrolled panel) ─────────────────────────────────────────
         ctrl_canvas = tk.Canvas(ctrl_frame, bg=PAL["gray"], highlightthickness=0, bd=0)
         ctrl_scrollbar = tk.Scrollbar(ctrl_frame, orient=tk.VERTICAL, command=ctrl_canvas.yview)
         ctrl_canvas.configure(yscrollcommand=ctrl_scrollbar.set)
@@ -775,25 +778,45 @@ class SimV0LauncherGUI:
 
         self._pb_build_controls(ctrl_inner)
 
-        # ── Embedded canvas ───────────────────────────────────────────────────
-        self._pb_fig = Figure(figsize=(5, 4), dpi=96,
-                              facecolor=PAL["console_bg"])
-        self._pb_ax  = self._pb_fig.add_subplot(111)
-        _style_axes(self._pb_ax)
+        # ── Inner notebook for plot history (subtabs within Plot Builder) ──────
+        plot_nb_style = ttk.Style()
+        plot_nb_style.configure(
+            "PlotTab.TNotebook",
+            background=PAL["console_bg"],
+            borderwidth=0,
+            tabmargins=[2, 2, 0, 0],
+        )
+        plot_nb_style.configure(
+            "PlotTab.TNotebook.Tab",
+            background=PAL["navy_mid"],
+            foreground=PAL["header"],
+            font=FONT_SECTION,
+            padding=[6, 2],
+            borderwidth=1,
+        )
+        plot_nb_style.map(
+            "PlotTab.TNotebook.Tab",
+            background=[("selected", PAL["navy_dark"]), ("active", PAL["navy"])],
+            foreground=[("selected", PAL["title_fg"]), ("active", PAL["header"])],
+        )
+        self._pb_plot_notebook = ttk.Notebook(canvas_frame, style="PlotTab.TNotebook")
+        self._pb_plot_notebook.pack(fill=tk.BOTH, expand=True)
+        # Switch active result/request when user changes tabs
+        self._pb_plot_notebook.bind(
+            "<<NotebookTabChanged>>", self._pb_on_tab_changed
+        )
 
-        self._pb_canvas = FigureCanvasTkAgg(self._pb_fig, master=canvas_frame)
-        self._pb_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        self._pb_canvas.draw()
-
-        # Save / clear buttons below the canvas
+        # Save / clear buttons below the plot notebook
         btn_bar = tk.Frame(canvas_frame, bg=PAL["navy_mid"], height=30)
         btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
         btn_bar.pack_propagate(False)
-        _make_btn(btn_bar, "Save Plot", self._pb_save, width=12
+        _make_btn(btn_bar, "Save Plot",   self._pb_save,           width=12
                   ).pack(side=tk.LEFT, padx=6, pady=3)
-        _make_btn(btn_bar, "Save Stats", self._pb_save_stats, width=12
+        _make_btn(btn_bar, "Save Stats",  self._pb_save_stats,     width=12
                   ).pack(side=tk.LEFT, padx=4, pady=3)
-        _make_btn(btn_bar, "Clear",     self._pb_clear, width=8
+        _make_btn(btn_bar, "Clear All",   self._pb_clear,          width=9
+                  ).pack(side=tk.LEFT, padx=4, pady=3)
+        _make_btn(btn_bar, "× Close Tab", self._pb_close_plot_tab, width=10
                   ).pack(side=tk.LEFT, padx=4, pady=3)
         self._pb_save_status = tk.StringVar(value="")
         tk.Label(
@@ -805,6 +828,7 @@ class SimV0LauncherGUI:
             anchor="w",
         ).pack(side=tk.LEFT, padx=6)
 
+        # Stats display with horizontal scrollbar, increased height
         stats_frame = tk.Frame(canvas_frame, bg=PAL["console_bg"])
         stats_frame.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Label(
@@ -815,9 +839,13 @@ class SimV0LauncherGUI:
             fg=PAL["header"],
             anchor="w",
         ).pack(fill=tk.X, padx=6, pady=(4, 2))
+        stats_inner = tk.Frame(stats_frame, bg=PAL["console_bg"])
+        stats_inner.pack(fill=tk.X, padx=6, pady=(0, 4))
+        stats_xsb = tk.Scrollbar(stats_inner, orient=tk.HORIZONTAL)
+        stats_xsb.pack(side=tk.BOTTOM, fill=tk.X)
         self._pb_stats_text = tk.Text(
-            stats_frame,
-            height=8,
+            stats_inner,
+            height=10,
             font=FONT_FIXED,
             bg=PAL["console_bg"],
             fg=PAL["phosphor"],
@@ -825,27 +853,29 @@ class SimV0LauncherGUI:
             relief=tk.SUNKEN,
             bd=1,
             wrap=tk.NONE,
+            xscrollcommand=stats_xsb.set,
         )
-        self._pb_stats_text.pack(fill=tk.X, padx=6, pady=(0, 4))
+        stats_xsb.config(command=self._pb_stats_text.xview)
+        self._pb_stats_text.pack(fill=tk.X)
         self._pb_set_stats_text("No statistics yet.")
 
     def _pb_build_controls(self, parent):
         """Build the left-side control panel for the Plot Builder."""
 
         def _sec(text):
-            fr = tk.Frame(parent, bg=PAL["navy"], height=20)
-            fr.pack(fill=tk.X, padx=4, pady=(6, 1))
+            fr = tk.Frame(parent, bg=PAL["navy"], height=22)
+            fr.pack(fill=tk.X, padx=4, pady=(10, 2))
             fr.pack_propagate(False)
             tk.Label(fr, text=f"  {text}", font=FONT_SECTION,
                      bg=PAL["navy"], fg=PAL["header"], anchor="w"
                      ).pack(fill=tk.X, padx=2)
 
-        def _row(parent_fr, label, widget_factory, pady=2):
+        def _row(parent_fr, label, widget_factory, pady=3):
             tk.Label(parent_fr, text=label, font=FONT_LABEL,
                      bg=PAL["gray"], fg=PAL["label_fg"], anchor="w"
-                     ).pack(fill=tk.X, padx=6, pady=(pady, 0))
+                     ).pack(fill=tk.X, padx=8, pady=(pady, 0))
             w = widget_factory(parent_fr)
-            w.pack(fill=tk.X, padx=6, pady=(0, pady))
+            w.pack(fill=tk.X, padx=8, pady=(0, pady))
             return w
 
         def _omenu(parent_fr, var, choices, cmd=None):
@@ -863,19 +893,22 @@ class SimV0LauncherGUI:
             m["menu"].config(font=FONT_LABEL, bg=PAL["gray"])
             return m
 
-        # Data files
+        # ── DATA SOURCE ───────────────────────────────────────────────────────
         _sec("DATA SOURCE")
         self._pb_files = self._list_dat_files()
         files_frame = tk.Frame(parent, bg=PAL["gray"])
-        files_frame.pack(fill=tk.BOTH, padx=6, pady=2)
+        files_frame.pack(fill=tk.BOTH, padx=8, pady=2)
         self._pb_file_list = tk.Listbox(
             files_frame,
             selectmode=tk.EXTENDED,
-            height=4,
+            height=7,
             exportselection=False,
             font=FONT_FIXED,
             bg=PAL["white"],
             fg=PAL["label_fg"],
+            selectbackground=PAL["navy_mid"],
+            selectforeground=PAL["title_fg"],
+            activestyle="dotbox",
         )
         for f in self._pb_files:
             self._pb_file_list.insert(tk.END, f)
@@ -884,9 +917,9 @@ class SimV0LauncherGUI:
         if self._pb_files:
             self._pb_file_list.selection_set(0)
         _make_btn(parent, "↺ Refresh files", self._pb_refresh_files, width=18
-                  ).pack(padx=8, pady=(0, 4), fill=tk.X)
+                  ).pack(padx=8, pady=(2, 6), fill=tk.X)
 
-        # Axes
+        # ── AXES ──────────────────────────────────────────────────────────────
         _sec("AXES")
         _placeholder = ["(load file first)"]
         self._pb_xcol_var = tk.StringVar(value=_placeholder[0])
@@ -905,7 +938,7 @@ class SimV0LauncherGUI:
             bg=PAL["white"], fg=PAL["label_fg"], relief=tk.SUNKEN, bd=1
         ))
 
-        # Plot type
+        # ── STYLE ─────────────────────────────────────────────────────────────
         _sec("STYLE")
         self._pb_mode_var  = tk.StringVar(value=self._PLOT_MODES[0])
         _row(parent, "Plot mode:", lambda p: _plain_omenu(p, self._pb_mode_var, self._PLOT_MODES))
@@ -916,14 +949,38 @@ class SimV0LauncherGUI:
         self._pb_backend_var = tk.StringVar(value=self._BACKENDS[0])
         _row(parent, "Backend:", lambda p: _plain_omenu(p, self._pb_backend_var, self._BACKENDS))
 
+        # Two-column row: Color (left) + Marker (right)
+        cm_outer = tk.Frame(parent, bg=PAL["gray"])
+        cm_outer.pack(fill=tk.X, padx=8, pady=3)
+        cm_outer.columnconfigure(0, weight=1)
+        cm_outer.columnconfigure(1, weight=1)
+
+        col_left = tk.Frame(cm_outer, bg=PAL["gray"])
+        col_left.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        tk.Label(col_left, text="Color:", font=FONT_LABEL,
+                 bg=PAL["gray"], fg=PAL["label_fg"], anchor="w").pack(fill=tk.X)
         self._pb_color_var = tk.StringVar(value=self._COLOR_NAMES[0])
-        _row(parent, "Color:", lambda p: _plain_omenu(p, self._pb_color_var, self._COLOR_NAMES))
+        _plain_omenu(col_left, self._pb_color_var, self._COLOR_NAMES).pack(fill=tk.X)
+        self._pb_color_swatch = tk.Canvas(
+            col_left, height=10, bg=self._COLORS[0],
+            highlightthickness=1, highlightbackground=PAL["gray_dark"]
+        )
+        self._pb_color_swatch.pack(fill=tk.X, pady=(2, 0))
 
+        col_right = tk.Frame(cm_outer, bg=PAL["gray"])
+        col_right.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        tk.Label(col_right, text="Marker:", font=FONT_LABEL,
+                 bg=PAL["gray"], fg=PAL["label_fg"], anchor="w").pack(fill=tk.X)
         self._pb_marker_var = tk.StringVar(value=self._MARKERS[0])
-        _row(parent, "Marker:", lambda p: _plain_omenu(p, self._pb_marker_var, self._MARKERS))
+        _plain_omenu(col_right, self._pb_marker_var, self._MARKERS).pack(fill=tk.X)
 
+        # Line width row
+        lw_frame = tk.Frame(parent, bg=PAL["gray"])
+        lw_frame.pack(fill=tk.X, padx=8, pady=3)
+        tk.Label(lw_frame, text="Line width:", font=FONT_LABEL,
+                 bg=PAL["gray"], fg=PAL["label_fg"], anchor="w").pack(fill=tk.X)
         self._pb_lw_var = tk.StringVar(value="1.5")
-        _row(parent, "Line width:", lambda p: _plain_omenu(p, self._pb_lw_var, self._LINE_WIDTHS))
+        _plain_omenu(lw_frame, self._pb_lw_var, self._LINE_WIDTHS).pack(fill=tk.X)
 
         self._pb_title_var = tk.StringVar(value="")
         _row(parent, "Title:", lambda p: tk.Entry(
@@ -942,37 +999,55 @@ class SimV0LauncherGUI:
             selectcolor=PAL["white"],
             activebackground=PAL["gray"],
             anchor="w",
-        ).pack(fill=tk.X, padx=6, pady=(2, 1))
+        ).pack(fill=tk.X, padx=8, pady=(2, 4))
 
-        # Presets
+        # ── PRESETS ───────────────────────────────────────────────────────────
         _sec("PRESETS")
         preset_names = list(PRESET_TEMPLATES.keys())
         self._pb_preset_var = tk.StringVar(value=preset_names[0] if preset_names else "None")
         _row(parent, "Preset:", lambda p: _omenu(p, self._pb_preset_var, preset_names or ["None"]))
-        _make_btn(parent, "Apply preset", self._pb_apply_preset, width=18
-                  ).pack(padx=8, pady=2, fill=tk.X)
+        _make_btn(parent, "↯ Apply Preset", self._pb_apply_preset, width=18
+                  ).pack(padx=8, pady=(2, 6), fill=tk.X)
 
-        # Series list
+        # ── SERIES ────────────────────────────────────────────────────────────
         _sec("SERIES")
+        self._pb_series_count_var = tk.StringVar(value="0 series added")
+        tk.Label(
+            parent,
+            textvariable=self._pb_series_count_var,
+            font=FONT_LABEL,
+            bg=PAL["gray"],
+            fg=PAL["label_fg"],
+            anchor="w",
+        ).pack(fill=tk.X, padx=8, pady=(0, 2))
         self._pb_series_list = tk.Listbox(
             parent,
             selectmode=tk.BROWSE,
-            height=5,
+            height=6,
             exportselection=False,
             font=FONT_FIXED,
             bg=PAL["white"],
             fg=PAL["label_fg"],
+            selectbackground=PAL["navy_mid"],
+            selectforeground=PAL["title_fg"],
         )
-        self._pb_series_list.pack(fill=tk.BOTH, padx=6, pady=2)
+        self._pb_series_list.pack(fill=tk.BOTH, padx=8, pady=2)
+        self._pb_series_list.bind("<<ListboxSelect>>", self._pb_series_selected)
         sbtn = tk.Frame(parent, bg=PAL["gray"])
-        sbtn.pack(fill=tk.X, padx=6, pady=(0, 2))
-        _make_btn(sbtn, "+ Add series", self._pb_add_series, width=12).pack(side=tk.LEFT, padx=2)
-        _make_btn(sbtn, "- Remove", self._pb_remove_series, width=10).pack(side=tk.LEFT, padx=2)
+        sbtn.pack(fill=tk.X, padx=8, pady=(0, 4))
+        _make_btn(sbtn, "+ Add",    self._pb_add_series,    width=8).pack(side=tk.LEFT, padx=2)
+        _make_btn(sbtn, "- Remove", self._pb_remove_series, width=8).pack(side=tk.LEFT, padx=2)
+        _make_btn(sbtn, "⟳ Update", self._pb_update_series, width=8).pack(side=tk.LEFT, padx=2)
 
-        # Build button
-        tk.Frame(parent, bg=PAL["gray"], height=8).pack()
+        # ── BUILD ─────────────────────────────────────────────────────────────
+        tk.Frame(parent, bg=PAL["navy"], height=1).pack(fill=tk.X, padx=4, pady=(8, 2))
         _make_btn(parent, "▶  Build Plot", self._pb_build, width=18
-                  ).pack(padx=8, pady=6, fill=tk.X)
+                  ).pack(padx=8, pady=8, fill=tk.X)
+
+        # Bind traces for live color swatch and live series style editing
+        self._pb_color_var.trace_add("write", self._pb_on_color_change)
+        self._pb_lw_var.trace_add("write", self._pb_on_style_change)
+        self._pb_marker_var.trace_add("write", self._pb_on_style_change)
 
         # Seed first series for convenience
         self._pb_update_col_menus()
@@ -1059,6 +1134,8 @@ class SimV0LauncherGUI:
             )
             self._pb_series.append(spec)
             self._pb_series_list.insert(tk.END, self._pb_series_desc(spec))
+        n = len(self._pb_series)
+        self._pb_series_count_var.set(f"{n} series added")
 
     def _pb_remove_series(self):
         sel = self._pb_series_list.curselection()
@@ -1067,11 +1144,19 @@ class SimV0LauncherGUI:
         idx = sel[0]
         del self._pb_series[idx]
         self._pb_series_list.delete(idx)
+        self._pb_editing_series_idx = None
+        n = len(self._pb_series)
+        self._pb_series_count_var.set(f"{n} series added")
 
     def _pb_series_desc(self, spec):
+        fname = os.path.basename(spec.file_path)
         eb = f" ±{spec.yerr_column}" if spec.yerr_column else ""
         z = f" z={spec.z_column}" if spec.z_column else ""
-        return f"{os.path.basename(spec.file_path)}:{spec.y_column}{eb}{z}"
+        color_name = (
+            self._COLOR_NAMES[self._COLORS.index(spec.color)]
+            if spec.color in self._COLORS else spec.color
+        )
+        return f"[{color_name}] {fname} · {spec.y_column}{eb}{z}"
 
     def _pb_apply_preset(self):
         if not self._pb_series:
@@ -1108,7 +1193,7 @@ class SimV0LauncherGUI:
         )
 
     def _pb_build(self):
-        """Build the plot from selected options via plotting service."""
+        """Build the plot and display it in a new subtab within the Plot Builder."""
         if not self._pb_series:
             messagebox.showwarning("Plot Builder", "Add at least one series before building.")
             return
@@ -1126,18 +1211,35 @@ class SimV0LauncherGUI:
             self._set_status("Plot build failed.")
             return
 
-        # Display rendered image
-        self._pb_fig.clear()
-        ax = self._pb_fig.add_subplot(111)
+        # Determine tab title from plot title or auto-number
+        tab_title = (
+            req.title if req.title and req.title != "simv0 plot"
+            else f"Plot {len(self._pb_plot_tabs) + 1}"
+        )
+
+        # Create a new plot subtab
+        fig, canvas, _frame = self._pb_new_plot_tab(tab_title)
+
+        # Display rendered image in the new tab
+        fig.clear()
+        ax = fig.add_subplot(111)
         _style_axes(ax)
         try:
             img = mpimg.imread(result.output_path)
             ax.imshow(img)
             ax.set_axis_off()
         except Exception:
-            ax.text(0.5, 0.5, "Plot rendered.\n(Preview unavailable)", ha="center", va="center", color=PAL["phosphor"])
-        self._pb_fig.tight_layout(pad=0.2)
-        self._pb_canvas.draw()
+            ax.text(0.5, 0.5, "Plot rendered.\n(Preview unavailable)",
+                    ha="center", va="center", color=PAL["phosphor"])
+        fig.tight_layout(pad=0.2)
+        canvas.draw()
+
+        # Store result/request in the tab record
+        active_idx = self._pb_plot_notebook.index("current")
+        if 0 <= active_idx < len(self._pb_plot_tabs):
+            self._pb_plot_tabs[active_idx]["result"]  = result
+            self._pb_plot_tabs[active_idx]["request"] = req
+
         self._pb_set_stats_text(format_stats_table(result.stats))
         self._pb_save_status.set("")
         self._set_status(f"Plot built via {result.backend_used}.")
@@ -1145,7 +1247,18 @@ class SimV0LauncherGUI:
 
     def _pb_save(self):
         """Export the current plot via plotting service to PNG/PDF."""
-        if not self._pb_current_request:
+        # Resolve the active tab's request
+        req = None
+        if self._pb_plot_tabs:
+            try:
+                active_idx = self._pb_plot_notebook.index("current")
+                if 0 <= active_idx < len(self._pb_plot_tabs):
+                    req = self._pb_plot_tabs[active_idx]["request"]
+            except Exception:
+                pass
+        if not req:
+            req = self._pb_current_request
+        if not req:
             messagebox.showwarning("Save Plot", "Build a plot first.")
             return
         plots_dir = os.path.join(self.simv0_dir, "data", "plots")
@@ -1159,9 +1272,10 @@ class SimV0LauncherGUI:
         )
         if not path:
             return
-        req = self._pb_make_request(output_path=path)
-        req.output_format = "pdf" if path.lower().endswith(".pdf") else "png"
-        result = self._plot_service.render(req)
+        # Re-render using the active request with the new output path
+        save_req = self._pb_make_request(output_path=path)
+        save_req.output_format = "pdf" if path.lower().endswith(".pdf") else "png"
+        result = self._plot_service.render(save_req)
         if not result.ok:
             messagebox.showerror("Save Plot", f"Could not save file:\n{result.error}")
             return
@@ -1199,18 +1313,218 @@ class SimV0LauncherGUI:
         self._pb_stats_text.configure(state=tk.DISABLED)
 
     def _pb_clear(self):
-        """Clear the embedded plot."""
-        self._pb_fig.clear()
-        ax = self._pb_fig.add_subplot(111)
-        _style_axes(ax)
-        self._pb_canvas.draw()
+        """Clear all plot subtabs, series, and reset the Plot Builder."""
+        import matplotlib.pyplot as plt
+        for tab in self._pb_plot_tabs:
+            try:
+                plt.close(tab["fig"])
+            except Exception:
+                pass
+        self._pb_plot_tabs.clear()
+        for tab_id in list(self._pb_plot_notebook.tabs()):
+            self._pb_plot_notebook.forget(tab_id)
         self._pb_series = []
         self._pb_series_list.delete(0, tk.END)
+        self._pb_series_count_var.set("0 series added")
+        self._pb_editing_series_idx = None
         self._pb_last_result = None
         self._pb_current_request = None
         self._pb_set_stats_text("No statistics yet.")
         self._pb_save_status.set("")
         self._set_status("Plot cleared.")
+
+    # ── Plot-tab helpers ─────────────────────────────────────────────────────
+
+    def _pb_new_plot_tab(self, title):
+        """Create a new plot subtab in the inner notebook. Returns (fig, canvas, frame)."""
+        frame = tk.Frame(self._pb_plot_notebook, bg=PAL["console_bg"])
+        self._pb_plot_notebook.add(frame, text=f"  {title}  ")
+        fig = Figure(figsize=(5, 4), dpi=96, facecolor=PAL["console_bg"])
+        ax  = fig.add_subplot(111)
+        _style_axes(ax)
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.draw()
+        self._pb_plot_tabs.append({
+            "frame":   frame,
+            "fig":     fig,
+            "canvas":  canvas,
+            "result":  None,
+            "request": None,
+        })
+        # Switch to the newly created tab
+        self._pb_plot_notebook.select(len(self._pb_plot_tabs) - 1)
+        return fig, canvas, frame
+
+    def _pb_close_plot_tab(self):
+        """Close the currently active plot subtab."""
+        if not self._pb_plot_tabs:
+            return
+        try:
+            active_idx = self._pb_plot_notebook.index("current")
+        except Exception:
+            return
+        if active_idx < 0 or active_idx >= len(self._pb_plot_tabs):
+            return
+        import matplotlib.pyplot as plt
+        tab = self._pb_plot_tabs.pop(active_idx)
+        try:
+            plt.close(tab["fig"])
+        except Exception:
+            pass
+        self._pb_plot_notebook.forget(active_idx)
+        # Update references to the newly-active tab (if any remain)
+        if self._pb_plot_tabs:
+            new_idx = min(active_idx, len(self._pb_plot_tabs) - 1)
+            self._pb_plot_notebook.select(new_idx)
+            active_tab = self._pb_plot_tabs[new_idx]
+            self._pb_last_result    = active_tab["result"]
+            self._pb_current_request = active_tab["request"]
+            if active_tab["result"]:
+                self._pb_set_stats_text(format_stats_table(active_tab["result"].stats))
+            else:
+                self._pb_set_stats_text("No statistics yet.")
+        else:
+            self._pb_last_result    = None
+            self._pb_current_request = None
+            self._pb_set_stats_text("No statistics yet.")
+        self._pb_save_status.set("")
+        self._set_status("Plot tab closed.")
+
+    def _pb_on_tab_changed(self, _event=None):
+        """Sync last_result/current_request when the user switches plot tabs."""
+        if not self._pb_plot_tabs:
+            return
+        try:
+            active_idx = self._pb_plot_notebook.index("current")
+        except Exception:
+            return
+        if active_idx < 0 or active_idx >= len(self._pb_plot_tabs):
+            return
+        tab = self._pb_plot_tabs[active_idx]
+        self._pb_last_result    = tab["result"]
+        self._pb_current_request = tab["request"]
+        if tab["result"]:
+            self._pb_set_stats_text(format_stats_table(tab["result"].stats))
+        else:
+            self._pb_set_stats_text("No statistics yet.")
+
+    # ── Live series editing helpers ───────────────────────────────────────────
+
+    def _pb_series_selected(self, _event=None):
+        """Load the selected series' style into the controls for live editing."""
+        sel = self._pb_series_list.curselection()
+        if not sel:
+            self._pb_editing_series_idx = None
+            return
+        idx = sel[0]
+        self._pb_editing_series_idx = idx
+        spec = self._pb_series[idx]
+        self._pb_live_edit_guard = True
+        try:
+            if spec.color in self._COLORS:
+                self._pb_color_var.set(self._COLOR_NAMES[self._COLORS.index(spec.color)])
+                self._pb_color_swatch.configure(bg=spec.color)
+            lw_str = str(spec.line_width)
+            if lw_str in self._LINE_WIDTHS:
+                self._pb_lw_var.set(lw_str)
+            marker_str = spec.marker or "None"
+            if marker_str in self._MARKERS:
+                self._pb_marker_var.set(marker_str)
+        finally:
+            self._pb_live_edit_guard = False
+
+    def _pb_on_color_change(self, *_args):
+        """Update the color swatch when the color selection changes."""
+        try:
+            color_name = self._pb_color_var.get()
+            if color_name in self._COLOR_NAMES:
+                self._pb_color_swatch.configure(
+                    bg=self._COLORS[self._COLOR_NAMES.index(color_name)]
+                )
+        except Exception:
+            pass
+        self._pb_on_style_change()
+
+    def _pb_on_style_change(self, *_args):
+        """Schedule a live re-render when a style control changes."""
+        if self._pb_live_edit_guard:
+            return
+        if self._pb_editing_series_idx is None:
+            return
+        if not self._pb_plot_tabs:
+            return
+        # Debounce: cancel any pending update and schedule a fresh one
+        if hasattr(self, "_pb_live_update_job"):
+            try:
+                self.root.after_cancel(self._pb_live_update_job)
+            except Exception:
+                pass
+        self._pb_live_update_job = self.root.after(300, self._pb_live_update)
+
+    def _pb_live_update(self):
+        """Apply current style controls to the selected series and re-render."""
+        idx = self._pb_editing_series_idx
+        if idx is None or idx >= len(self._pb_series):
+            return
+        if not self._pb_plot_tabs:
+            return
+        spec = self._pb_series[idx]
+        color_name = self._pb_color_var.get()
+        if color_name in self._COLOR_NAMES:
+            spec.color = self._COLORS[self._COLOR_NAMES.index(color_name)]
+        try:
+            spec.line_width = float(self._pb_lw_var.get())
+        except ValueError:
+            pass
+        marker = self._pb_marker_var.get()
+        spec.marker = None if marker == "None" else marker
+        # Refresh the list item description
+        self._pb_series_list.delete(idx)
+        self._pb_series_list.insert(idx, self._pb_series_desc(spec))
+        self._pb_series_list.selection_set(idx)
+        # Re-render the active plot tab
+        self._pb_rebuild_active_tab()
+
+    def _pb_rebuild_active_tab(self):
+        """Re-render the active plot tab after series style changes."""
+        if not self._pb_plot_tabs:
+            return
+        try:
+            active_idx = self._pb_plot_notebook.index("current")
+        except Exception:
+            return
+        if active_idx < 0 or active_idx >= len(self._pb_plot_tabs):
+            return
+        req = self._pb_make_request(output_path=None)
+        result = self._plot_service.render(req)
+        if not result.ok:
+            return
+        tab = self._pb_plot_tabs[active_idx]
+        tab["fig"].clear()
+        ax = tab["fig"].add_subplot(111)
+        _style_axes(ax)
+        try:
+            img = mpimg.imread(result.output_path)
+            ax.imshow(img)
+            ax.set_axis_off()
+        except Exception:
+            ax.text(0.5, 0.5, "Plot rendered.\n(Preview unavailable)",
+                    ha="center", va="center", color=PAL["phosphor"])
+        tab["fig"].tight_layout(pad=0.2)
+        tab["canvas"].draw()
+        tab["result"]  = result
+        tab["request"] = req
+        self._pb_current_request = req
+        self._pb_last_result     = result
+        self._pb_set_stats_text(format_stats_table(result.stats))
+
+    def _pb_update_series(self):
+        """Explicit 'Update Series' button: apply current style to selected series."""
+        if self._pb_editing_series_idx is None:
+            messagebox.showinfo("Update Series", "Select a series from the list first.")
+            return
+        self._pb_live_update()
 
     # -----------------------------------------------------------------------
     #  Console helpers
