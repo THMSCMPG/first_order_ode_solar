@@ -21,3 +21,7 @@ Code_Dev/*/rk4_ode
 Code_Dev/*/euler_ode
 Code_Dev/*/heun_ode
 Code_Dev/*/*_ode
+
+# Python bytecode
+__pycache__/
+*.py[cod]
